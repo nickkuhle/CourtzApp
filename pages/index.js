@@ -1,32 +1,16 @@
 import { useEffect, useMemo, useState } from 'react'
 import CourtGrid from '../components/CourtGrid'
 import CourtSchedule from '../components/CourtSchedule'
+import {
+  DEFAULT_LOCATIONS,
+  DEFAULT_COURTS_BY_LOCATION,
+  DEFAULT_ROSTER,
+} from '../lib/defaults'
 
 const LOGO_URL = '/logo.svg'
 
-const LOCATIONS = [
-  'Barnes Tennis Center',
-  'Peninsula Tennis Club',
-  'Point Loma Nazarene College',
-]
-
-const COURTS_BY_LOCATION = {
-  'Barnes Tennis Center': [4, 5],
-  'Peninsula Tennis Club': [1, 2, 7, 8, 9, 10, 11, 12],
-  'Point Loma Nazarene College': [1, 2, 3, 4, 5, 6],
-}
-
-// Roster of tournament players (only these names may reserve)
-const ROSTER = [
-  'Alice Johnson',
-  'Becca Smith',
-  'Carla Gomez',
-  'Diana Lee',
-  'Eva Martinez',
-  'Fiona Chen',
-  'Grace Park',
-  'Hannah Kim',
-]
+// Hardcoded fallbacks live in lib/defaults.js — when Google Sheets is
+// configured, /api/config serves the real locations, courts, and roster.
 
 const PLAYER_PASSCODES = {
   alice: 'Alice Johnson',
@@ -66,14 +50,47 @@ export default function Home() {
   })
 
   const [selectedDay, setSelectedDay] = useState(days[0].key)
-  const [selectedLocation, setSelectedLocation] = useState(LOCATIONS[0])
+  const [selectedLocation, setSelectedLocation] = useState(DEFAULT_LOCATIONS[0])
   const [selectedCourt, setSelectedCourt] = useState(null)
-  const [currentPlayer, setCurrentPlayer] = useState('Alice Johnson')
+  const [currentPlayer, setCurrentPlayer] = useState(DEFAULT_ROSTER[0])
 
   const [reservations, setReservations] = useState({})
+  const [locations, setLocations] = useState(DEFAULT_LOCATIONS)
+  const [courtsByLocation, setCourtsByLocation] = useState(DEFAULT_COURTS_BY_LOCATION)
+  const [roster, setRoster] = useState(DEFAULT_ROSTER)
 
   useEffect(() => {
     setCurrentPlayer(getPlayerFromUrl())
+  }, [])
+
+  useEffect(() => {
+    async function loadConfig() {
+      try {
+        const response = await fetch('/api/config')
+        if (!response.ok) {
+          throw new Error('Failed to load config')
+        }
+        const result = await response.json()
+
+        if (result.locations && result.locations.length) {
+          setLocations(result.locations)
+          setSelectedLocation((prev) =>
+            result.locations.includes(prev) ? prev : result.locations[0]
+          )
+        }
+        if (result.courtsByLocation) {
+          setCourtsByLocation(result.courtsByLocation)
+        }
+        if (result.roster && result.roster.length) {
+          setRoster(result.roster)
+          setCurrentPlayer((prev) => (result.roster.includes(prev) ? prev : result.roster[0]))
+        }
+      } catch (e) {
+        console.error('Failed reading site config', e)
+      }
+    }
+
+    loadConfig()
   }, [])
 
   useEffect(() => {
@@ -115,13 +132,13 @@ export default function Home() {
   }, [])
 
   const courts = useMemo(() => {
-    return (COURTS_BY_LOCATION[selectedLocation] || []).map((number) => ({
+    return (courtsByLocation[selectedLocation] || []).map((number) => ({
       id: number,
       number,
       location: selectedLocation,
       date: selectedDay,
     }))
-  }, [selectedLocation, selectedDay])
+  }, [courtsByLocation, selectedLocation, selectedDay])
 
   function handleSelectCourt(id) {
     setSelectedCourt(id)
@@ -170,7 +187,7 @@ export default function Home() {
                 onChange={(e) => setCurrentPlayer(e.target.value)}
                 className="rounded-full border border-emerald-200 bg-white px-3 py-1 text-sm text-slate-800 focus:border-emerald-500 focus:outline-none"
               >
-                {ROSTER.map((name) => (
+                {roster.map((name) => (
                   <option key={name} value={name}>{name}</option>
                 ))}
               </select>
@@ -204,7 +221,7 @@ export default function Home() {
                 onChange={(e) => setSelectedLocation(e.target.value)}
                 className="w-72 appearance-none rounded-2xl border border-slate-700 bg-slate-950 px-4 py-3 text-slate-100 shadow-inner shadow-black/10 focus:border-emerald-400 focus:outline-none"
               >
-                {LOCATIONS.map((l) => (
+                {locations.map((l) => (
                   <option key={l} value={l} className="bg-slate-950 text-slate-100">
                     {l}
                   </option>
@@ -227,7 +244,7 @@ export default function Home() {
           <h2 className="text-2xl font-semibold text-white mb-3">Info</h2>
           <p className="text-slate-300 leading-relaxed">Welcome to the USTA Girl's National Championships practice court scheduler. Use this page to book 30-minute practice sessions at the selected venue for the tournament.</p>
           <ul className="mt-4 space-y-2 text-slate-300">
-            <li>• Practice-only courts are available at {LOCATIONS.join(', ')}.</li>
+            <li>• Practice-only courts are available at {locations.join(', ')}.</li>
             <li>• Select a date and location, then click a court to reserve a 30-minute slot.</li>
             <li>• Reservations persist on the backend so your schedule remains available across sessions.</li>
           </ul>
@@ -248,7 +265,7 @@ export default function Home() {
           date={selectedDay}
           location={selectedLocation}
           reservations={reservations}
-          roster={ROSTER}
+          roster={roster}
           currentPlayer={currentPlayer}
           onReserve={(courtId, slot, name) => handleReserve(courtId, slot, name)}
           onClose={() => setSelectedCourt(null)}

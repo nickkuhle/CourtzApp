@@ -28,6 +28,11 @@ yarn-error.log*
 # local env files
 .env*.local
 
+# downloaded Google service account keys
+*-key.json
+*-credentials.json
+service-account*.json
+
 # vercel
 .vercel
 
