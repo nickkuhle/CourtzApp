@@ -76,6 +76,49 @@ function isSameDay(a, b) {
   return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate()
 }
 
+function formatTimeLabel(totalMinutes) {
+  const hours = Math.floor(totalMinutes / 60)
+  const minutes = totalMinutes % 60
+  const suffix = hours >= 12 ? 'PM' : 'AM'
+  const displayHours = hours % 12 === 0 ? 12 : hours % 12
+  const displayMinutes = String(minutes).padStart(2, '0')
+  return `${displayHours}:${displayMinutes} ${suffix}`
+}
+
+const THIRTY_MIN_SLOTS = (() => {
+  const labels = []
+  for (let t = 8 * 60; t <= 18 * 60; t += 30) {
+    labels.push(`${formatTimeLabel(t)}–${formatTimeLabel(t + 30)}`)
+  }
+  return labels
+})()
+
+function findOpenCourts(reservations, selectedDay, locationFilter) {
+  const locations = locationFilter ? [locationFilter] : LOCATIONS
+  const results = []
+
+  for (const location of locations) {
+    for (const courtId of COURTS_BY_LOCATION[location] || []) {
+      const reserved = reservations[`${location}|${selectedDay}|${courtId}`] || {}
+      const openSlots = THIRTY_MIN_SLOTS.filter((label) => {
+        const players = reserved[label]
+        return !Array.isArray(players) || players.length === 0
+      })
+      if (openSlots.length > 0) {
+        results.push({
+          location,
+          courtId,
+          openCount: openSlots.length,
+          nextSlot: openSlots[0],
+        })
+      }
+    }
+  }
+
+  results.sort((a, b) => b.openCount - a.openCount || a.location.localeCompare(b.location) || a.courtId - b.courtId)
+  return results
+}
+
 export default function Home() {
   const [mounted, setMounted] = useState(false)
   const [days, setDays] = useState([])
@@ -92,6 +135,7 @@ export default function Home() {
   const [pendingReservations, setPendingReservations] = useState({})
   const [showFindCourt, setShowFindCourt] = useState(false)
   const [findResults, setFindResults] = useState([])
+  const [findScope, setFindScope] = useState('all')
 
   useEffect(() => {
     setMounted(true)
@@ -279,7 +323,11 @@ export default function Home() {
             <button className="rounded-full px-3 py-1.5 bg-emerald-500 text-white shadow-sm shadow-emerald-500/20 transition">Practice Courts</button>
             <button
               type="button"
-              onClick={() => setShowFindCourt(true)}
+              onClick={() => {
+                setFindScope('all')
+                setFindResults(findOpenCourts(reservations, selectedDay, null))
+                setShowFindCourt(true)
+              }}
               className="rounded-full px-3 py-1.5 bg-white/15 text-white border border-white/20 hover:bg-white/25 transition"
             >
               Find a Court
@@ -376,11 +424,12 @@ export default function Home() {
 
         {/* Location Selector */}
         <div className="mb-8">
-          <div className="flex items-center gap-3 mb-3 px-1">
+          <div className="flex items-center justify-center gap-3 mb-3 px-1">
+            <div className="h-px flex-1 max-w-[8rem] bg-slate-200" />
             <h2 className="text-sm font-semibold text-slate-500 uppercase tracking-wider">Select Location</h2>
-            <div className="h-px flex-1 bg-slate-200" />
+            <div className="h-px flex-1 max-w-[8rem] bg-slate-200" />
           </div>
-          <div className="flex flex-wrap gap-2">
+          <div className="flex flex-wrap justify-center gap-2">
             {LOCATIONS.map((loc) => {
               const isActive = selectedLocation === loc
               return (
@@ -488,14 +537,28 @@ export default function Home() {
               </div>
               <div className="flex flex-wrap gap-2 mt-4">
                 <button
-                  onClick={() => setFindResults(findOpenCourts(reservations, selectedDay, null))}
-                  className="rounded-full bg-emerald-500 text-white text-sm font-medium px-4 py-1.5"
+                  onClick={() => {
+                    setFindScope('all')
+                    setFindResults(findOpenCourts(reservations, selectedDay, null))
+                  }}
+                  className={`rounded-full text-sm font-medium px-4 py-1.5 ${
+                    findScope === 'all'
+                      ? 'bg-emerald-500 text-white'
+                      : 'bg-white/15 text-white border border-white/20'
+                  }`}
                 >
                   Search all locations
                 </button>
                 <button
-                  onClick={() => setFindResults(findOpenCourts(reservations, selectedDay, selectedLocation))}
-                  className="rounded-full bg-white/15 text-white text-sm font-medium px-4 py-1.5 border border-white/20"
+                  onClick={() => {
+                    setFindScope(selectedLocation)
+                    setFindResults(findOpenCourts(reservations, selectedDay, selectedLocation))
+                  }}
+                  className={`rounded-full text-sm font-medium px-4 py-1.5 ${
+                    findScope === selectedLocation
+                      ? 'bg-emerald-500 text-white'
+                      : 'bg-white/15 text-white border border-white/20'
+                  }`}
                 >
                   Search {LOCATION_SHORT[selectedLocation] || selectedLocation}
                 </button>
@@ -503,7 +566,7 @@ export default function Home() {
             </div>
             <div className="p-4 max-h-[60vh] overflow-auto">
               {findResults.length === 0 ? (
-                <p className="text-sm text-slate-500 text-center py-8">Tap search to see courts with open time slots.</p>
+                <p className="text-sm text-slate-500 text-center py-8">No open 30-minute slots found for this day.</p>
               ) : (
                 <div className="space-y-2">
                   {findResults.map((r) => (
