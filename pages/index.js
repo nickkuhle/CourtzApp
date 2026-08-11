@@ -90,6 +90,8 @@ export default function Home() {
   const [playerSearch, setPlayerSearch] = useState("")
   const [showPlayerDropdown, setShowPlayerDropdown] = useState(false)
   const [pendingReservations, setPendingReservations] = useState({})
+  const [showFindCourt, setShowFindCourt] = useState(false)
+  const [findResults, setFindResults] = useState([])
 
   useEffect(() => {
     setMounted(true)
@@ -275,6 +277,13 @@ export default function Home() {
           </div>
           <div className="flex flex-wrap lg:flex-nowrap justify-center items-center gap-2 text-sm shrink-0">
             <button className="rounded-full px-3 py-1.5 bg-emerald-500 text-white shadow-sm shadow-emerald-500/20 transition">Practice Courts</button>
+            <button
+              type="button"
+              onClick={() => setShowFindCourt(true)}
+              className="rounded-full px-3 py-1.5 bg-white/15 text-white border border-white/20 hover:bg-white/25 transition"
+            >
+              Find a Court
+            </button>
             <div className="relative flex items-center gap-1.5 rounded-full border border-emerald-400/70 bg-emerald-500 px-2.5 py-1.5 shadow-sm shadow-emerald-500/20">
               <span className="text-xs font-medium text-white whitespace-nowrap hidden sm:block">Signed in as</span>
               <div className="relative">
@@ -336,11 +345,12 @@ export default function Home() {
 
         {/* Day Selector — Pill Buttons */}
         <div className="mb-6">
-          <div className="flex items-center gap-3 mb-3 px-1">
+          <div className="flex items-center justify-center gap-3 mb-3 px-1">
+            <div className="h-px flex-1 max-w-[8rem] bg-slate-200" />
             <h2 className="text-sm font-semibold text-slate-500 uppercase tracking-wider">Select Day</h2>
-            <div className="h-px flex-1 bg-slate-200" />
+            <div className="h-px flex-1 max-w-[8rem] bg-slate-200" />
           </div>
-          <div className="flex gap-2 overflow-x-auto pb-2 px-1 -mx-1 scrollbar-thin">
+          <div className="flex gap-2 overflow-x-auto pb-2 px-1 -mx-1 scrollbar-thin justify-center">
             {days.map((d) => {
               const isActive = selectedDay === d.key
               return (
@@ -461,6 +471,69 @@ export default function Home() {
           Click a court to view the schedule and reserve 30-minute slots.
         </footer>
       </div>
+
+      {showFindCourt && (
+        <div className="fixed inset-0 z-50 flex items-start md:items-center justify-center overflow-auto">
+          <div className="absolute inset-0 bg-slate-900/60 backdrop-blur-sm" onClick={() => setShowFindCourt(false)} />
+          <div className="relative bg-white rounded-2xl shadow-2xl max-w-lg w-full mx-4 my-8 overflow-hidden">
+            <div className="bg-gradient-to-br from-[#1f5f99] to-[#164a7a] px-6 py-5">
+              <div className="flex justify-between items-start">
+                <div>
+                  <h2 className="text-xl font-bold text-white">Find a Court</h2>
+                  <p className="text-sm text-blue-200 mt-1">Open 30-minute slots for {selectedDay}</p>
+                </div>
+                <button onClick={() => setShowFindCourt(false)} className="rounded-lg bg-white/10 hover:bg-white/20 p-2 text-white" aria-label="Close">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg>
+                </button>
+              </div>
+              <div className="flex flex-wrap gap-2 mt-4">
+                <button
+                  onClick={() => setFindResults(findOpenCourts(reservations, selectedDay, null))}
+                  className="rounded-full bg-emerald-500 text-white text-sm font-medium px-4 py-1.5"
+                >
+                  Search all locations
+                </button>
+                <button
+                  onClick={() => setFindResults(findOpenCourts(reservations, selectedDay, selectedLocation))}
+                  className="rounded-full bg-white/15 text-white text-sm font-medium px-4 py-1.5 border border-white/20"
+                >
+                  Search {LOCATION_SHORT[selectedLocation] || selectedLocation}
+                </button>
+              </div>
+            </div>
+            <div className="p-4 max-h-[60vh] overflow-auto">
+              {findResults.length === 0 ? (
+                <p className="text-sm text-slate-500 text-center py-8">Tap search to see courts with open time slots.</p>
+              ) : (
+                <div className="space-y-2">
+                  {findResults.map((r) => (
+                    <button
+                      key={`${r.location}-${r.courtId}`}
+                      onClick={() => {
+                        setSelectedLocation(r.location)
+                        setSelectedCourt(r.courtId)
+                        setShowFindCourt(false)
+                      }}
+                      className="w-full text-left rounded-xl border border-slate-200 hover:border-emerald-300 hover:bg-emerald-50/50 px-4 py-3 transition"
+                    >
+                      <div className="flex justify-between items-center gap-3">
+                        <div>
+                          <div className="font-semibold text-slate-800">Court {r.courtId}</div>
+                          <div className="text-xs text-slate-500">{r.location}</div>
+                        </div>
+                        <div className="text-right">
+                          <div className="text-sm font-medium text-emerald-700">{r.openCount} open</div>
+                          <div className="text-xs text-slate-400">Next: {r.nextSlot}</div>
+                        </div>
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
 
       {selectedCourt && (
         <CourtSchedule
