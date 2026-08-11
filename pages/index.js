@@ -16,8 +16,8 @@ const COURTS_BY_LOCATION = {
   'Point Loma Nazarene College': [1, 2, 3, 4, 5, 6],
 }
 
-// Roster of tournament players (only these names may reserve)
-const ROSTER = [
+// Roster - now loaded live from Google Sheets (fallback to fake names if not configured)
+const FALLBACK_ROSTER = [
   'Alice Johnson',
   'Becca Smith',
   'Carla Gomez',
@@ -58,19 +58,44 @@ function getDateKey(d) {
 }
 
 export default function Home() {
-  const today = new Date()
-  const days = [0, 1, 2].map((offset) => {
-    const d = new Date(today)
-    d.setDate(today.getDate() + offset)
-    return { label: `${formatDate(d)}`, key: getDateKey(d) }
-  })
-
-  const [selectedDay, setSelectedDay] = useState(days[0].key)
+  const [mounted, setMounted] = useState(false)
+  const [days, setDays] = useState([])
+  const [selectedDay, setSelectedDay] = useState("")
   const [selectedLocation, setSelectedLocation] = useState(LOCATIONS[0])
   const [selectedCourt, setSelectedCourt] = useState(null)
   const [currentPlayer, setCurrentPlayer] = useState('Alice Johnson')
 
   const [reservations, setReservations] = useState({})
+  const [roster, setRoster] = useState(FALLBACK_ROSTER)
+  const [rosterLoaded, setRosterLoaded] = useState(false)
+  const [playerSearch, setPlayerSearch] = useState("")
+  const [showPlayerDropdown, setShowPlayerDropdown] = useState(false)
+
+  useEffect(() => {
+    setMounted(true)
+    // Generate days from today until Sunday Aug 16 (tournament end)
+    const today = new Date()
+    const endDate = new Date('2026-08-16T12:00:00') // tournament Sunday
+    const newDays = []
+    const cur = new Date(today)
+    // Include today and go until Sunday
+    let daysCount = 0
+    while (cur <= endDate && daysCount < 14) {
+      newDays.push({ label: `${formatDate(new Date(cur))}`, key: getDateKey(cur) })
+      cur.setDate(cur.getDate() + 1)
+      daysCount++
+    }
+    // Fallback to at least 3 days if endDate passed
+    if (newDays.length === 0) {
+      for (let offset = 0; offset < 3; offset++) {
+        const d = new Date(today)
+        d.setDate(today.getDate() + offset)
+        newDays.push({ label: `${formatDate(d)}`, key: getDateKey(d) })
+      }
+    }
+    setDays(newDays)
+    setSelectedDay(newDays[0].key)
+  }, [])
 
   useEffect(() => {
     setCurrentPlayer(getPlayerFromUrl())
@@ -89,9 +114,30 @@ export default function Home() {
         console.error('Failed reading reservations', e)
       }
     }
+    async function loadRoster() {
+      try {
+        const res = await fetch('/api/roster')
+        const data = await res.json()
+        if (data.roster && Array.isArray(data.roster) && data.roster.length > 0) {
+          setRoster(data.roster)
+        }
+      } catch (e) {
+        console.warn('Using fallback roster', e)
+      } finally {
+        setRosterLoaded(true)
+      }
+    }
 
     loadReservations()
+    loadRoster()
   }, [])
+
+  // Keep currentPlayer valid when roster loads
+  useEffect(() => {
+    if (rosterLoaded && roster.length > 0 && !roster.includes(currentPlayer)) {
+      setCurrentPlayer(roster[0])
+    }
+  }, [rosterLoaded])
 
   // Normalize old reservation shape: ensure slot entries are arrays of names
   useEffect(() => {
@@ -147,33 +193,86 @@ export default function Home() {
     }
   }
 
+  // Prevent hydration mismatch: render nothing on server until mounted
+  if (!mounted) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-[#f7fafc] text-slate-500">
+        Loading Courtz...
+      </div>
+    )
+  }
+
   return (
     <div className="min-h-screen bg-[radial-gradient(circle_at_top,_rgba(134,239,172,0.18),_transparent_18%),linear-gradient(180deg,#f7fafc_0%,#e2f3e8_35%,#f1f5f9_100%)] p-6 text-slate-900">
       <div className="max-w-6xl mx-auto">
-        <nav className="sticky top-6 z-40 flex flex-col lg:flex-row justify-between items-center gap-4 bg-[#1f5f99]/80 border border-blue-300/10 backdrop-blur-xl rounded-[2rem] px-8 py-5 shadow-2xl shadow-slate-950/20 mb-8">
-          <div className="flex items-center gap-3">
-            <img src={LOGO_URL} alt="USTA logo" className="h-12 w-12 rounded-full border border-white/20 bg-white/10 object-cover" />
-            <div>
-              <div className="text-lg font-semibold tracking-tight text-white">USTA Girl's National Championships</div>
-              <div className="text-xs uppercase tracking-[0.2em] text-slate-400">{selectedLocation}</div>
+        <nav className="sticky top-6 z-40 flex flex-wrap lg:flex-nowrap justify-between items-center gap-3 bg-[#1f5f99]/80 border border-blue-300/10 backdrop-blur-xl rounded-[2rem] px-6 py-4 shadow-2xl shadow-slate-950/20 mb-8">
+          <div className="flex items-center gap-3 min-w-0">
+            <img src={LOGO_URL} alt="USTA logo" className="h-10 w-10 rounded-full border border-white/20 bg-white/10 object-cover shrink-0" />
+            <div className="min-w-0">
+              <div className="text-base lg:text-lg font-semibold tracking-tight text-white truncate">USTA Girl's National Championships</div>
+              <div className="text-xs uppercase tracking-[0.15em] text-slate-400 truncate">{selectedLocation}</div>
             </div>
           </div>
-          <div className="flex flex-wrap justify-center items-center gap-3 text-sm">
-            <a href="https://ustagirlsnationals.com" target="_blank" rel="noreferrer" className="rounded-full px-4 py-2 text-slate-200 hover:text-white hover:bg-white/10 transition">Tournament</a>
-            <button className="rounded-full px-4 py-2 bg-emerald-500 text-white shadow-sm shadow-emerald-500/20 transition">Practice Courts</button>
-            <a href="#info" className="rounded-full px-4 py-2 text-slate-200 hover:text-white hover:bg-white/10 transition">Info</a>
-            <a href="#contact" className="rounded-full px-4 py-2 text-slate-200 hover:text-white hover:bg-white/10 transition">Contact</a>
-            <div className="flex items-center gap-2 rounded-full border border-emerald-400/70 bg-emerald-500 px-3 py-2 shadow-sm shadow-emerald-500/20">
-              <span className="text-sm font-medium text-white">Signed in as</span>
-              <select
-                value={currentPlayer}
-                onChange={(e) => setCurrentPlayer(e.target.value)}
-                className="rounded-full border border-emerald-200 bg-white px-3 py-1 text-sm text-slate-800 focus:border-emerald-500 focus:outline-none"
-              >
-                {ROSTER.map((name) => (
-                  <option key={name} value={name}>{name}</option>
-                ))}
-              </select>
+          <div className="flex flex-wrap lg:flex-nowrap justify-center items-center gap-2 text-sm shrink-0">
+            <a href="https://ustagirlsnationals.com" target="_blank" rel="noreferrer" className="rounded-full px-3 py-1.5 text-slate-200 hover:text-white hover:bg-white/10 transition hidden xl:block">Tournament</a>
+            <button className="rounded-full px-3 py-1.5 bg-emerald-500 text-white shadow-sm shadow-emerald-500/20 transition hidden md:block">Practice Courts</button>
+            <a href="#info" className="rounded-full px-3 py-1.5 text-slate-200 hover:text-white hover:bg-white/10 transition hidden lg:block">Info</a>
+            <a href="#contact" className="rounded-full px-3 py-1.5 text-slate-200 hover:text-white hover:bg-white/10 transition hidden lg:block">Contact</a>
+            <div className="relative flex items-center gap-1.5 rounded-full border border-emerald-400/70 bg-emerald-500 px-2.5 py-1.5 shadow-sm shadow-emerald-500/20">
+              <span className="text-xs font-medium text-white whitespace-nowrap hidden sm:block">Signed in as</span>
+              <div className="relative">
+                <input
+                  type="text"
+                  value={showPlayerDropdown ? playerSearch : currentPlayer}
+                  onChange={(e) => {
+                    setPlayerSearch(e.target.value)
+                    setShowPlayerDropdown(true)
+                  }}
+                  onFocus={() => {
+                    setPlayerSearch(currentPlayer)
+                    setShowPlayerDropdown(true)
+                  }}
+                  onBlur={() => setTimeout(() => setShowPlayerDropdown(false), 150)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      const filtered = roster.filter(n => n.toLowerCase().includes(playerSearch.toLowerCase()))
+                      if (filtered.length) {
+                        setCurrentPlayer(filtered[0])
+                        setShowPlayerDropdown(false)
+                      }
+                    }
+                    if (e.key === 'Escape') setShowPlayerDropdown(false)
+                  }}
+                  placeholder="Search player..."
+                  className="w-36 lg:w-40 rounded-full border border-emerald-200 bg-white px-2.5 py-1 text-xs lg:text-sm text-slate-800 focus:border-emerald-500 focus:outline-none"
+                />
+                {showPlayerDropdown && (
+                  <div className="absolute top-full mt-2 left-0 w-56 lg:w-64 max-h-64 overflow-auto rounded-xl border border-slate-200 bg-white shadow-xl z-50">
+                    {roster
+                      .filter(n => n.toLowerCase().includes(playerSearch.toLowerCase()))
+                      .slice(0, 30)
+                      .map((name) => (
+                        <button
+                          key={name}
+                          onMouseDown={() => {
+                            setCurrentPlayer(name)
+                            setPlayerSearch(name)
+                            setShowPlayerDropdown(false)
+                          }}
+                          className={`w-full text-left px-3 py-1.5 text-sm hover:bg-emerald-50 ${name === currentPlayer ? 'bg-emerald-100 font-semibold text-emerald-800' : 'text-slate-700'}`}
+                        >
+                          {name}
+                        </button>
+                      ))}
+                    {roster.filter(n => n.toLowerCase().includes(playerSearch.toLowerCase())).length === 0 && (
+                      <div className="px-4 py-2 text-sm text-slate-400">No match</div>
+                    )}
+                    <div className="px-3 py-1 text-xs text-slate-400 border-t">
+                      {roster.filter(n => n.toLowerCase().includes(playerSearch.toLowerCase())).length} of {roster.length} players
+                    </div>
+                  </div>
+                )}
+              </div>
             </div>
           </div>
         </nav>
@@ -248,7 +347,7 @@ export default function Home() {
           date={selectedDay}
           location={selectedLocation}
           reservations={reservations}
-          roster={ROSTER}
+          roster={roster}
           currentPlayer={currentPlayer}
           onReserve={(courtId, slot, name) => handleReserve(courtId, slot, name)}
           onClose={() => setSelectedCourt(null)}
