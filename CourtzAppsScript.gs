@@ -42,8 +42,17 @@ function doPost(e) {
   try {
     const data = JSON.parse(e.postData.contents);
     if (data.action === "toggleReservation") {
-      const result = toggleGridReservation(ss, data); // data: {location, date, courtId, slot, name}
-      return jsonResponse({ success: true, reservations: result });
+      // Serialise writes so two admins cannot claim the same open cell at once.
+      const lock = LockService.getDocumentLock();
+      lock.waitLock(10000);
+      try {
+        toggleGridReservation(ss, data); // data: {location, date, courtId, slot, name}
+      } finally {
+        lock.releaseLock();
+      }
+      // Do not re-parse every tab after a one-cell update. The app updates this
+      // slot optimistically; its next read supplies the complete fresh schedule.
+      return jsonResponse({ success: true });
     }
     return jsonResponse({ success: false, error: "Unknown POST action" });
   } catch (err) {
@@ -185,20 +194,20 @@ function toggleGridReservation(ss, data) {
       // If name already exists, delete it
       if (cell1 === name) {
         sh.getRange(r+1, courtCol+1).clearContent();
-        return getAllReservations(ss);
+        return true;
       }
       if (cell2 === name) {
         sh.getRange(r+2, courtCol+1).clearContent();
-        return getAllReservations(ss);
+        return true;
       }
       // Otherwise add to first empty
       if (!cell1) {
         sh.getRange(r+1, courtCol+1).setValue(name);
-        return getAllReservations(ss);
+        return true;
       }
       if (cell2 !== null && !cell2) {
         sh.getRange(r+2, courtCol+1).setValue(name);
-        return getAllReservations(ss);
+        return true;
       }
       throw new Error("Slot full at " + sheetName + " " + targetDate + " Court " + courtId + " " + data.slot);
     }

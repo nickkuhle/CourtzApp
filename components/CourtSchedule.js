@@ -33,7 +33,7 @@ function Slot({ time, reservedBy = [], onClick, disabled }) {
   )
 }
 
-export default function CourtSchedule({ court, date, location, reservations, roster = [], currentPlayer = 'Alice Johnson', onReserve, onClose }) {
+export default function CourtSchedule({ court, date, location, reservations, roster = [], currentPlayer = 'Alice Johnson', pendingReservations = {}, onReserve, onClose }) {
   if (!court) return null
 
   const [selectedDuration, setSelectedDuration] = useState(location === 'Barnes Tennis Center' ? 30 : 60)
@@ -91,12 +91,14 @@ export default function CourtSchedule({ court, date, location, reservations, ros
               const players = reserved[slot.label] || []
               const isOwnedByCurrentPlayer = players.includes(currentPlayer)
               const isReservedBySomeoneElse = players.length > 0 && !isOwnedByCurrentPlayer
+              const requestKey = `${key}|${slot.label}|${currentPlayer}`
+              const isSaving = Boolean(pendingReservations[requestKey])
               return (
                 <Slot
                   key={slot.label}
                   time={slot.label}
                   reservedBy={players}
-                  disabled={isReservedBySomeoneElse}
+                  disabled={isReservedBySomeoneElse || isSaving}
                   onClick={() => {
                     if (isOwnedByCurrentPlayer) {
                       if (confirm(`Cancel your reservation at ${slot.label}?`)) {
