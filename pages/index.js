@@ -70,6 +70,7 @@ export default function Home() {
   const [rosterLoaded, setRosterLoaded] = useState(false)
   const [playerSearch, setPlayerSearch] = useState("")
   const [showPlayerDropdown, setShowPlayerDropdown] = useState(false)
+  const [pendingReservations, setPendingReservations] = useState({})
 
   useEffect(() => {
     setMounted(true)
@@ -102,34 +103,21 @@ export default function Home() {
   }, [])
 
   useEffect(() => {
-    async function loadReservations() {
+    async function loadSchedule() {
       try {
-        const response = await fetch('/api/reservations')
-        if (!response.ok) {
-          throw new Error('Failed to load reservations')
-        }
+        const response = await fetch('/api/schedule')
+        if (!response.ok) throw new Error('Failed to load schedule')
         const result = await response.json()
         setReservations(result.reservations || {})
+        if (Array.isArray(result.roster) && result.roster.length > 0) setRoster(result.roster)
       } catch (e) {
-        console.error('Failed reading reservations', e)
-      }
-    }
-    async function loadRoster() {
-      try {
-        const res = await fetch('/api/roster')
-        const data = await res.json()
-        if (data.roster && Array.isArray(data.roster) && data.roster.length > 0) {
-          setRoster(data.roster)
-        }
-      } catch (e) {
-        console.warn('Using fallback roster', e)
+        console.warn('Using locally available schedule data', e)
       } finally {
         setRosterLoaded(true)
       }
     }
 
-    loadReservations()
-    loadRoster()
+    loadSchedule()
   }, [])
 
   // Keep currentPlayer valid when roster loads
@@ -173,23 +161,62 @@ export default function Home() {
     setSelectedCourt(id)
   }
 
+  const selectedCourtIndex = courts.findIndex((court) => court.id === selectedCourt)
+
   async function handleReserve(courtId, slot, name) {
+    const reservationKey = `${selectedLocation}|${selectedDay}|${courtId}`
+    const requestKey = `${reservationKey}|${slot}|${name}`
+    if (pendingReservations[requestKey]) return
+
+    // Update only the affected slot before Google Sheets responds. This makes
+    // reserve/cancel feel instant and still allows a targeted rollback on failure.
+    const wasReserved = (reservations[reservationKey]?.[slot] || []).includes(name)
+    setPendingReservations((pending) => ({ ...pending, [requestKey]: true }))
+    setReservations((current) => {
+      const next = { ...current }
+      const courtReservations = { ...(next[reservationKey] || {}) }
+      const names = Array.isArray(courtReservations[slot]) ? [...courtReservations[slot]] : []
+      const existingIndex = names.indexOf(name)
+      if (existingIndex >= 0) names.splice(existingIndex, 1)
+      else names.push(name)
+      if (names.length) courtReservations[slot] = names
+      else delete courtReservations[slot]
+      if (Object.keys(courtReservations).length) next[reservationKey] = courtReservations
+      else delete next[reservationKey]
+      return next
+    })
+
     try {
       const response = await fetch('/api/reservations', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ location: selectedLocation, date: selectedDay, courtId, slot, name }),
       })
-
-      if (!response.ok) {
-        throw new Error('Unable to save reservation')
-      }
-
-      const result = await response.json()
-      setReservations(result.reservations || {})
+      if (!response.ok) throw new Error('Unable to save reservation')
     } catch (e) {
       console.error('Failed saving reservation', e)
+      // Roll back this slot only, preserving any other booking that finished
+      // while this request was in flight.
+      setReservations((current) => {
+        const next = { ...current }
+        const courtReservations = { ...(next[reservationKey] || {}) }
+        const names = Array.isArray(courtReservations[slot]) ? [...courtReservations[slot]] : []
+        const index = names.indexOf(name)
+        if (wasReserved && index === -1) names.push(name)
+        if (!wasReserved && index >= 0) names.splice(index, 1)
+        if (names.length) courtReservations[slot] = names
+        else delete courtReservations[slot]
+        if (Object.keys(courtReservations).length) next[reservationKey] = courtReservations
+        else delete next[reservationKey]
+        return next
+      })
       alert('Unable to update reservation. Please try again.')
+    } finally {
+      setPendingReservations((pending) => {
+        const next = { ...pending }
+        delete next[requestKey]
+        return next
+      })
     }
   }
 
@@ -349,7 +376,12 @@ export default function Home() {
           reservations={reservations}
           roster={roster}
           currentPlayer={currentPlayer}
+          pendingReservations={pendingReservations}
           onReserve={(courtId, slot, name) => handleReserve(courtId, slot, name)}
+          canGoPrevious={selectedCourtIndex > 0}
+          canGoNext={selectedCourtIndex >= 0 && selectedCourtIndex < courts.length - 1}
+          onPreviousCourt={() => setSelectedCourt(courts[selectedCourtIndex - 1].id)}
+          onNextCourt={() => setSelectedCourt(courts[selectedCourtIndex + 1].id)}
           onClose={() => setSelectedCourt(null)}
         />
       )}
