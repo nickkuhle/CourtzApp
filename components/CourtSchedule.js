@@ -33,7 +33,7 @@ function Slot({ time, reservedBy = [], onClick, disabled }) {
   )
 }
 
-export default function CourtSchedule({ court, date, location, reservations, roster = [], currentPlayer = 'Alice Johnson', pendingReservations = {}, onReserve, onClose }) {
+export default function CourtSchedule({ court, date, location, reservations, roster = [], currentPlayer = 'Alice Johnson', pendingReservations = {}, onReserve, onPreviousCourt, onNextCourt, canGoPrevious = false, canGoNext = false, onClose }) {
   if (!court) return null
 
   const [selectedDuration, setSelectedDuration] = useState(location === 'Barnes Tennis Center' ? 30 : 60)
@@ -41,6 +41,15 @@ export default function CourtSchedule({ court, date, location, reservations, ros
   useEffect(() => {
     setSelectedDuration(location === 'Barnes Tennis Center' ? 30 : 60)
   }, [location])
+
+  useEffect(() => {
+    function handleKeyDown(event) {
+      if (event.key === 'ArrowLeft' && canGoPrevious) onPreviousCourt?.()
+      if (event.key === 'ArrowRight' && canGoNext) onNextCourt?.()
+    }
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [canGoPrevious, canGoNext, onPreviousCourt, onNextCourt])
 
   const key = `${location}|${date}|${court}`
   const reserved = reservations[key] || {}
@@ -66,7 +75,29 @@ export default function CourtSchedule({ court, date, location, reservations, ros
               <h2 className="text-xl font-semibold text-white">Court {court}</h2>
               <div className="text-sm text-blue-100">{location} — {date}</div>
             </div>
-            <button onClick={onClose} className="text-white bg-white/10 hover:bg-white/20 px-3 py-1 rounded">Close</button>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={onPreviousCourt}
+                disabled={!canGoPrevious}
+                aria-label="Previous court"
+                title="Previous court (left arrow)"
+                className="rounded bg-white/10 px-3 py-1 text-lg leading-none text-white hover:bg-white/20 disabled:cursor-not-allowed disabled:opacity-35"
+              >
+                ←
+              </button>
+              <button
+                type="button"
+                onClick={onNextCourt}
+                disabled={!canGoNext}
+                aria-label="Next court"
+                title="Next court (right arrow)"
+                className="rounded bg-white/10 px-3 py-1 text-lg leading-none text-white hover:bg-white/20 disabled:cursor-not-allowed disabled:opacity-35"
+              >
+                →
+              </button>
+              <button onClick={onClose} className="text-white bg-white/10 hover:bg-white/20 px-3 py-1 rounded">Close</button>
+            </div>
           </div>
         </div>
 

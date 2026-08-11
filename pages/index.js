@@ -161,6 +161,8 @@ export default function Home() {
     setSelectedCourt(id)
   }
 
+  const selectedCourtIndex = courts.findIndex((court) => court.id === selectedCourt)
+
   async function handleReserve(courtId, slot, name) {
     const reservationKey = `${selectedLocation}|${selectedDay}|${courtId}`
     const requestKey = `${reservationKey}|${slot}|${name}`
@@ -376,6 +378,10 @@ export default function Home() {
           currentPlayer={currentPlayer}
           pendingReservations={pendingReservations}
           onReserve={(courtId, slot, name) => handleReserve(courtId, slot, name)}
+          canGoPrevious={selectedCourtIndex > 0}
+          canGoNext={selectedCourtIndex >= 0 && selectedCourtIndex < courts.length - 1}
+          onPreviousCourt={() => setSelectedCourt(courts[selectedCourtIndex - 1].id)}
+          onNextCourt={() => setSelectedCourt(courts[selectedCourtIndex + 1].id)}
           onClose={() => setSelectedCourt(null)}
         />
       )}
