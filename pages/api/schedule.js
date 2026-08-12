@@ -9,7 +9,10 @@ export default async function handler(req, res) {
   }
 
   try {
-    const schedule = await getSchedule()
+    // A forced refresh is used right after a write. On serverless hosts the POST
+    // and GET routes may run in different workers, so clearing only the POST
+    // worker's memory cache is not enough.
+    const schedule = await getSchedule({ forceRefresh: req.query.refresh === '1' })
     res.setHeader('Cache-Control', 'private, max-age=0, must-revalidate')
     return res.status(200).json(schedule)
   } catch (error) {

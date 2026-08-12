@@ -69,7 +69,12 @@ function formatDateDay(d) {
 }
 
 function getDateKey(d) {
-  return d.toISOString().slice(0, 10)
+  // Use the date shown in the visitor's own timezone. toISOString() uses UTC
+  // and could accidentally move an evening booking to the following day.
+  const year = d.getFullYear()
+  const month = String(d.getMonth() + 1).padStart(2, '0')
+  const day = String(d.getDate()).padStart(2, '0')
+  return `${year}-${month}-${day}`
 }
 
 function isSameDay(a, b) {
@@ -189,9 +194,9 @@ export default function Home() {
   // Loads the full schedule (reservations + roster). The response also reports
   // whether the server is actually wired to Google Sheets; when it is not, a
   // warning banner is shown instead of silently presenting empty data.
-  const refreshSchedule = useCallback(async () => {
+  const refreshSchedule = useCallback(async (force = false) => {
     try {
-      const response = await fetch('/api/schedule')
+      const response = await fetch(force ? '/api/schedule?refresh=1' : '/api/schedule')
       if (!response.ok) throw new Error('Failed to load schedule')
       const result = await response.json()
       lastScheduleSync.current = Date.now()
@@ -304,7 +309,7 @@ export default function Home() {
       if (!response.ok) throw new Error('Unable to save reservation')
       // Re-sync from the sheet shortly after the write so the local view
       // always settles on what the backend actually stored.
-      setTimeout(() => refreshSchedule(), 1000)
+      setTimeout(() => refreshSchedule(true), 1000)
       return true
     } catch (e) {
       console.error('Failed saving reservation', e)
@@ -472,27 +477,33 @@ export default function Home() {
           </div>
         </nav>
 
-        {/* Google Sheets connection warning — only when the server reports it
-            is NOT backed by a write-capable Sheets connection. Falling back to
-            local storage is exactly what made existing reservations appear to
-            disappear, so surface it loudly instead of failing silently. */}
+        {/* A plain-language connection light lets the desk know whether it is
+            safe to make bookings. Never hide a failed Sheets connection. */}
+        {sheetsConnected === true && (
+          <div className="mb-6 flex items-center justify-center gap-2 text-sm font-medium text-emerald-800" role="status">
+            <span className="h-2.5 w-2.5 rounded-full bg-emerald-500 shadow-[0_0_0_4px_rgba(16,185,129,0.12)]" />
+            Google Sheet connected — reservations are up to date
+          </div>
+        )}
         {sheetsConnected === false && (
-          <div className="mb-6 flex items-start gap-3 rounded-2xl border border-amber-300 bg-amber-50 px-4 py-3 text-amber-900 shadow-sm" role="alert">
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="shrink-0 mt-0.5 text-amber-500">
+          <div className="mb-6 flex flex-wrap items-center gap-3 rounded-2xl border border-amber-300 bg-amber-50 px-4 py-3 text-amber-900 shadow-sm" role="alert">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="shrink-0 text-amber-500">
               <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
               <line x1="12" y1="9" x2="12" y2="13" />
               <line x1="12" y1="17" x2="12.01" y2="17" />
             </svg>
-            <div className="text-sm leading-relaxed">
-              <span className="font-semibold">Not connected to Google Sheets.</span> The app is showing fallback data, so existing reservations may be missing and new bookings will not be saved to the sheet. Check the <code className="rounded bg-amber-100 px-1 py-0.5 text-xs">SHEETS_WEBAPP_URL</code> setting and confirm the latest <code className="rounded bg-amber-100 px-1 py-0.5 text-xs">CourtzAppsScript.gs</code> is deployed as a web app with access set to &quot;Anyone&quot;.
+            <div className="min-w-[12rem] flex-1 text-sm leading-relaxed">
+              <span className="font-semibold">The Google Sheet is not connected.</span> Do not make a booking yet because it may not be saved.
             </div>
             <button
               type="button"
-              onClick={() => setSheetsConnected(null)}
-              className="ml-auto shrink-0 rounded-lg p-1 text-amber-500 hover:bg-amber-100 hover:text-amber-700 transition"
-              aria-label="Dismiss"
+              onClick={() => {
+                setSheetsConnected(null)
+                refreshSchedule(true)
+              }}
+              className="ml-auto shrink-0 rounded-lg border border-amber-300 bg-white px-3 py-1.5 text-sm font-semibold text-amber-800 hover:bg-amber-100 transition"
             >
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg>
+              Try again
             </button>
           </div>
         )}
