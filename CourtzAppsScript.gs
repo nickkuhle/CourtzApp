@@ -2,7 +2,7 @@
 // SHEET_ID: 1U3TcsbIhQ9lxeo0_LtHYTldIqbkWg2Je  (TEST COPY - do not point at the real sheet)
 // Bump SCRIPT_VERSION on every edit so the app (and you) can verify which
 // deployment is actually live via WEBAPP_URL?action=ping.
-const SCRIPT_VERSION = "2.0";
+const SCRIPT_VERSION = "2.1";
 const SHEET_ID = "1U3TcsbIhQ9lxeo0_LtHYTldIqbkWg2Je";
 const DEFAULT_TOURNAMENT_YEAR = "2026";
 const LOCATION_MAP = {
@@ -14,6 +14,11 @@ const LOCATION_MAP = {
   "USD": "USD"
 };
 const COURT_TABS = Object.keys(LOCATION_MAP);
+// The three practice sites shown by default. USD, Balboa and Pacific Beach are
+// match-play sites: they stay hidden in the app unless the desk adds them
+// deliberately, and their reservations never count toward the practice-session
+// limit unless they have been added.
+const PRACTICE_DEFAULTS = ["Barnes Tennis Center", "Peninsula Tennis Club", "Point Loma Nazarene College"];
 const MONTHS = { jan:"01", feb:"02", mar:"03", apr:"04", may:"05", jun:"06", jul:"07", aug:"08", sep:"09", oct:"10", nov:"11", dec:"12" };
 
 function jsonResponse(data) {
@@ -74,16 +79,24 @@ function doPost(e) {
     lock.waitLock(15000);
     try {
       if (data.action === "bookGroup") {
-        bookGroup(ss, data); // data: {location, date, courtId, slots: [], names: []}
+        // data: {location, date, courtId, slots: [], names: [], staffApproved?, practiceLocations?}
+        validateBookingForWrite(ss, "book", data, data.slots, data.names);
+        bookGroup(ss, data);
         return jsonResponse({ success: true, version: SCRIPT_VERSION, action: "bookGroup" });
       }
       if (data.action === "cancelGroup") {
-        cancelGroup(ss, data); // data: {location, date, courtId, slots: [], names: []}
+        // data: {location, date, courtId, slots: [], names: []}
+        validateBookingForWrite(ss, "cancel", data, data.slots, data.names);
+        cancelGroup(ss, data);
         return jsonResponse({ success: true, version: SCRIPT_VERSION, action: "cancelGroup" });
       }
       if (data.action === "toggleReservation") {
-        // Single-player toggle kept for older app builds.
-        toggleGridReservation(ss, data); // data: {location, date, courtId, slot, name}
+        // Single-player toggle kept for older app builds. A toggle can be
+        // either a booking or a cancellation, so only the booking-window rules
+        // (date + ended slots) are applied.
+        // data: {location, date, courtId, slot, name, staffApproved?, practiceLocations?}
+        validateBookingForWrite(ss, "cancel", data, [data.slot], [data.name]);
+        toggleGridReservation(ss, data);
         return jsonResponse({ success: true, version: SCRIPT_VERSION, action: "toggleReservation" });
       }
     } finally {
@@ -91,8 +104,45 @@ function doPost(e) {
     }
     return jsonResponse({ success: false, version: SCRIPT_VERSION, error: "Unknown POST action" });
   } catch (err) {
+    if (err && err.isRulesError) {
+      return jsonResponse({ success: false, version: SCRIPT_VERSION, error: err.message, code: err.code });
+    }
     return jsonResponse({ success: false, version: SCRIPT_VERSION, error: err.toString(), stack: err.stack });
   }
+}
+
+// Re-checks the booking-window and session rules INSIDE the write lock, on the
+// reservations currently stored in the Sheet, so stale browser data can never
+// bypass them. Mirrors validateBooking in lib/booking-rules.js.
+function validateBookingForWrite(ss, action, data, slots, names) {
+  const reservations = getAllReservations(ss);
+  const validation = validateBookingGS({
+    action: action,
+    location: data.location,
+    date: String(data.date),
+    courtId: data.courtId,
+    slots: slots,
+    names: names,
+    staffApproved: Boolean(data.staffApproved),
+    reservations: reservations,
+    practiceLocations: data.practiceLocations
+  });
+  if (!validation.ok) {
+    throw rulesError(validation.error, validation.isSessionLimitError ? "SESSION_LIMIT" : "BOOKING_RULES");
+  }
+  if (validation.warnings.length && !data.staffApproved) {
+    throw rulesError(
+      "This booking is within one hour of another practice session. Tournament staff approval is required to continue.",
+      "STAFF_APPROVAL_REQUIRED"
+    );
+  }
+}
+
+function rulesError(message, code) {
+  const err = new Error(message);
+  err.isRulesError = true;
+  err.code = code;
+  return err;
 }
 
 // --- ROSTER ---
@@ -140,12 +190,39 @@ function readFullSchedule(ss) {
 
   const roster = getRosterData(ss).map(r => r.Name || r.name).filter(Boolean);
   const days = Object.keys(datesSet).sort();
+
+  // v2.1: 30-minute slots whose end time has already passed (America/Los_Angeles)
+  // are view-only, so they are no longer exposed as bookable/cancellable.
+  for (const k in all) {
+    const dateKey = String(k).split("|")[1];
+    for (const slot in all[k]) {
+      if (isSlotCompleted(dateKey, slot)) delete all[k][slot];
+    }
+    if (!Object.keys(all[k]).length) delete all[k];
+  }
+
+  // v2.1: per-player practice-session metadata for the three default practice
+  // locations, so the UI can show how many sessions a player has used on each
+  // day. Hidden match-play sites are deliberately NOT included.
+  const practiceSessions = {};
+  days.forEach(d => {
+    practiceSessions[d] = {};
+    PRACTICE_DEFAULTS.forEach(loc => {
+      const sessions = existingPlayerSessionsGS(all, d, null, PRACTICE_DEFAULTS);
+      practiceSessions[d][loc] = sessions
+        .filter(s => s.location === loc)
+        .map(s => ({ player: s.player, court: s.court, start: s.start, slots: s.slots }));
+    });
+  });
+
   return {
     roster: roster,
     reservations: all,
     days: days,
     courtsByDate: courtsByDate,
-    locations: COURT_TABS.map(name => LOCATION_MAP[name] || name)
+    locations: COURT_TABS.map(name => LOCATION_MAP[name] || name),
+    practiceSessions: practiceSessions,
+    defaultPracticeLocations: PRACTICE_DEFAULTS
   };
 }
 
@@ -452,6 +529,238 @@ function addMinutes(timeStr, mins) {
 
 function slotStartLabel(slot) {
   return String(slot).split(/[\u2013-]/)[0].trim();
+}
+
+// --- BOOKING RULES (mirrors lib/booking-rules.js - keep in sync) ---
+// 1. Bookings/cancellations are only allowed for today and tomorrow in
+//    America/Los_Angeles (San Diego), regardless of device/server timezone.
+// 2. A 30-minute slot is finished once its END time has passed - the current
+//    30-minute slot stays available (at 1:15 PM, 1:00-1:30 PM is still open).
+// 3. A player may hold at most TWO practice sessions per day across every
+//    active practice location. Barnes: every occupied 30-minute slot is one
+//    session. Other locations: for the same player/date/location/court, two
+//    immediately consecutive 30-minute slots group into ONE 60-minute session
+//    (at most two slots per session). Proximity checks compare session STARTS,
+//    never the two internal halves of one 60-minute session.
+// 4. A new session back-to-back with another, or starting within one hour of
+//    another session's start, needs explicit tournament-staff approval. The
+//    staff override bypasses ONLY that warning - never the 2-session maximum.
+
+const LA_RULES = [
+  // [startMsUtc inclusive, endMsUtc exclusive, offsetMinutes] (DST-aware 2026)
+  [1767225600000, 1772964000000, -480], // 2026-01-01T00:00Z..2026-03-08T10:00Z PST
+  [1772964000000, 1793523600000, -420], // 2026-03-08T10:00Z..2026-11-01T09:00Z PDT
+  [1793523600000, 1798761600000, -480]  // 2026-11-01T09:00Z..2027-01-01T00:00Z PST
+];
+const MAX_SESSIONS_PER_DAY = 2;
+
+function laOffsetMinutes(msUtc) {
+  if (!isFinite(msUtc)) return -480;
+  for (let i = 0; i < LA_RULES.length; i++) {
+    if (msUtc >= LA_RULES[i][0] && msUtc < LA_RULES[i][1]) return LA_RULES[i][2];
+  }
+  return -480;
+}
+
+function laNow() {
+  const nowMs = Date.now();
+  const totalMinutes = Math.floor((nowMs + laOffsetMinutes(nowMs) * 60000) / 60000);
+  const d = new Date(totalMinutes * 60000);
+  const y = d.getUTCFullYear();
+  const m = ("0" + (d.getUTCMonth() + 1)).slice(-2);
+  const day = ("0" + d.getUTCDate()).slice(-2);
+  return { dateKey: y + "-" + m + "-" + day, minutes: d.getUTCHours() * 60 + d.getUTCMinutes() };
+}
+
+function dateKeyToUtcMinutes(dateKey) {
+  const m = String(dateKey).match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!m) return NaN;
+  return Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3])) / 60000;
+}
+
+function isBookableDay(dateKey) {
+  const target = dateKeyToUtcMinutes(dateKey);
+  const today = dateKeyToUtcMinutes(laNow().dateKey);
+  if (isNaN(target) || isNaN(today)) return false;
+  const diff = Math.round((target - today) / (24 * 60));
+  return diff === 0 || diff === 1;
+}
+
+function isSlotCompleted(dateKey, slotLabel) {
+  const start = timeToMinutes(slotStartLabel(slotLabel));
+  if (isNaN(start)) return true;
+  const end = start + 30;
+  const now = laNow();
+  if (dateKey < now.dateKey) return true;
+  if (dateKey > now.dateKey) return false;
+  return end <= now.minutes;
+}
+
+function isBarnesLocationGS(location) {
+  return /barnes/i.test(String(location || ""));
+}
+
+function cleanPracticeLocationsGS(list) {
+  if (!Array.isArray(list)) return PRACTICE_DEFAULTS.slice();
+  const out = [];
+  list.forEach(l => {
+    const v = String(l).trim();
+    if (v && out.indexOf(v) === -1) out.push(v);
+  });
+  return out.length ? out : PRACTICE_DEFAULTS.slice();
+}
+
+// Groups existing Sheet reservations into the sessions that count toward the
+// limit (see the header comment above). Returns
+// [{ player, location, court, start, slots }].
+function existingPlayerSessionsGS(reservations, dateKey, name, practiceLocations) {
+  const active = {};
+  cleanPracticeLocationsGS(practiceLocations).forEach(l => { active[l] = true; });
+  const groups = [];
+  const seen = {};
+
+  for (const key in reservations) {
+    const parts = String(key).split("|");
+    const location = parts[0], date = parts[1], court = parts[2];
+    if (!location || !date || !court) continue;
+    if (date !== dateKey) continue;
+    if (!active[location]) continue;
+    const slots = reservations[key];
+    if (!slots || typeof slots !== "object") continue;
+
+    const byPlayer = {};
+    for (const slotLabel in slots) {
+      const start = timeToMinutes(slotStartLabel(slotLabel));
+      if (isNaN(start)) continue;
+      const names = Array.isArray(slots[slotLabel]) ? slots[slotLabel] : [slots[slotLabel]];
+      names.forEach(raw => {
+        const n = String(raw).trim();
+        if (!n) return;
+        if (!byPlayer[n]) byPlayer[n] = [];
+        byPlayer[n].push({ start: start, slotLabel: slotLabel });
+      });
+    }
+
+    for (const player in byPlayer) {
+      if (name && player !== name) continue;
+      const sorted = byPlayer[player].slice().sort(function (a, b) { return a.start - b.start; });
+      const sessions = [];
+      let current = null;
+      for (let i = 0; i < sorted.length; i++) {
+        const entry = sorted[i];
+        if (isBarnesLocationGS(location)) {
+          sessions.push({ location: location, court: court, start: entry.start, slots: [entry.slotLabel] });
+          continue;
+        }
+        if (current && entry.start === current.start + 30 && current.slots.length < 2) {
+          current.slots.push(entry.slotLabel);
+        } else {
+          current = { location: location, court: court, start: entry.start, slots: [entry.slotLabel] };
+          sessions.push(current);
+        }
+      }
+      sessions.forEach(function (s) {
+        const id = player + "|" + location + "|" + court + "|" + s.start;
+        if (seen[id]) return;
+        seen[id] = true;
+        groups.push({ player: player, location: s.location, court: s.court, start: s.start, slots: s.slots });
+      });
+    }
+  }
+  return groups;
+}
+
+// The proposed NEW booking as one session (a 60-minute non-Barnes booking is
+// ONE session even though it occupies two 30-minute Sheet slots).
+function proposedSessionGS(location, date, courtId, slots) {
+  const cleaned = [];
+  (slots || []).forEach(s => {
+    const v = String(s).trim();
+    if (v && cleaned.indexOf(v) === -1) cleaned.push(v);
+  });
+  let start = null;
+  for (let i = 0; i < cleaned.length; i++) {
+    const sm = timeToMinutes(slotStartLabel(cleaned[i]));
+    if (!isNaN(sm)) { start = sm; break; }
+  }
+  return { location: location, date: date, courtId: String(courtId), slots: cleaned, start: start };
+}
+
+function validateBookingGS(opts) {
+  const action = opts.action;
+  const location = opts.location;
+  const date = String(opts.date);
+  const courtId = opts.courtId;
+  const staffApproved = Boolean(opts.staffApproved);
+  const reservations = opts.reservations || {};
+  const practiceLocations = opts.practiceLocations;
+
+  const cleanedNames = [];
+  (opts.names || []).forEach(n => {
+    const v = String(n).trim();
+    if (v && cleanedNames.indexOf(v) === -1) cleanedNames.push(v);
+  });
+  const cleanedSlots = [];
+  (opts.slots || []).forEach(s => {
+    const v = String(s).trim();
+    if (v && cleanedSlots.indexOf(v) === -1) cleanedSlots.push(v);
+  });
+
+  if (!cleanedNames.length) return { ok: false, error: "No players given" };
+  if (!cleanedSlots.length) return { ok: false, error: "No time slots given" };
+  if (!isBookableDay(date)) {
+    return { ok: false, error: "Bookings and cancellations are only allowed for today and tomorrow (view-only for other days)." };
+  }
+  for (let i = 0; i < cleanedSlots.length; i++) {
+    if (isSlotCompleted(date, cleanedSlots[i])) {
+      return { ok: false, error: "The time slot " + cleanedSlots[i] + " has already ended and can no longer be changed." };
+    }
+  }
+
+  const warnings = [];
+  const hardLimitErrors = [];
+
+  for (let p = 0; p < cleanedNames.length; p++) {
+    const player = cleanedNames[p];
+    const existing = existingPlayerSessionsGS(reservations, date, player, practiceLocations);
+    const proposed = proposedSessionGS(location, date, courtId, cleanedSlots);
+    if (proposed.start === null) {
+      return { ok: false, error: "The time slot \"" + cleanedSlots.join("\", \"") + "\" could not be read." };
+    }
+
+    const all = existing.slice();
+    let sameIndex = -1;
+    for (let i = 0; i < all.length; i++) {
+      if (String(all[i].court) === proposed.courtId && all[i].start === proposed.start) { sameIndex = i; break; }
+    }
+    let proposedSessionObj = null;
+    if (sameIndex === -1) {
+      proposedSessionObj = { location: location, court: proposed.courtId, start: proposed.start, slots: proposed.slots.slice() };
+      all.push(proposedSessionObj);
+    }
+
+    if (action === "book") {
+      if (all.length > MAX_SESSIONS_PER_DAY) {
+        hardLimitErrors.push(player + " would have " + all.length + " practice sessions on " + date + "; the maximum is " + MAX_SESSIONS_PER_DAY + ".");
+        continue;
+      }
+      let closeSession = null;
+      for (let i = 0; i < all.length; i++) {
+        if (all[i] !== proposedSessionObj && all[i].start !== null && proposed.start !== null && Math.abs(all[i].start - proposed.start) <= 60) {
+          closeSession = all[i];
+          break;
+        }
+      }
+      if (closeSession && !staffApproved) {
+        warnings.push(player + "'s new " + location + " session is within one hour of another practice session (staff approval required).");
+      }
+    }
+  }
+
+  if (hardLimitErrors.length) {
+    return { ok: false, error: hardLimitErrors.join(" "), warnings: warnings, hardLimitErrors: hardLimitErrors, isSessionLimitError: true };
+  }
+  return { ok: true, error: null, warnings: warnings, hardLimitErrors: [] };
 }
 
 // --- WRITES ---
