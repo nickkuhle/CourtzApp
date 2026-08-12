@@ -2,7 +2,7 @@
 // SHEET_ID: 1U3TcsbIhQ9lxeo0_LtHYTldIqbkWg2Je
 // Bump SCRIPT_VERSION on every edit so the app (and you) can verify which
 // deployment is actually live via WEBAPP_URL?action=ping.
-const SCRIPT_VERSION = "1.1";
+const SCRIPT_VERSION = "1.2";
 const SHEET_ID = "1U3TcsbIhQ9lxeo0_LtHYTldIqbkWg2Je";
 const LOCATION_MAP = {
   "Barnes TC": "Barnes Tennis Center",
@@ -237,8 +237,9 @@ function parseSheetDate(cell){
   if (cell==null || cell==="") return null;
   if (Object.prototype.toString.call(cell) === "[object Date]" && !isNaN(cell)) {
     if (cell.getFullYear() === 1899) return null; // time, not date
-    // Fix sheet bug where some dates are stored as 2001 instead of 2026
-    if (cell.getFullYear() !== 2026) {
+    // A few copied cells contain the hidden year 2001 even though their visible
+    // month/day belongs to this 2026 tournament.
+    if (cell.getFullYear() === 2001) {
       return "2026-" + ("0" + (cell.getMonth()+1)).slice(-2) + "-" + ("0" + cell.getDate()).slice(-2);
     }
     return Utilities.formatDate(cell, Session.getScriptTimeZone(), "yyyy-MM-dd");
@@ -248,9 +249,14 @@ function parseSheetDate(cell){
   const m=s.match(/(?:Sun|Mon|Tue|Wed|Thu|Fri|Sat)\s+([A-Za-z]+)\s+(\d{1,2})/i);
   if(m){ const mon=months[m[1].toLowerCase().slice(0,3)]; const day=("0"+m[2]).slice(-2); return "2026-"+mon+"-"+day; }
   const iso=s.match(/(\d{4})-(\d{2})-(\d{2})/);
-  if(iso) return iso[0];
+  if(iso) return (iso[1] === "2001" ? "2026" : iso[1]) + "-" + iso[2] + "-" + iso[3];
+  const mdY=s.match(/(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+  if(mdY) return (mdY[3] === "2001" ? "2026" : mdY[3]) + "-" + ("0"+mdY[1]).slice(-2) + "-" + ("0"+mdY[2]).slice(-2);
   const d=new Date(s);
-  if(!isNaN(d.getTime()) && s.length>6 && d.getFullYear()>2000) return Utilities.formatDate(d, Session.getScriptTimeZone(), "yyyy-MM-dd");
+  if(!isNaN(d.getTime()) && s.length>6 && d.getFullYear()>2000) {
+    if(d.getFullYear() === 2001) return "2026-" + ("0"+(d.getMonth()+1)).slice(-2) + "-" + ("0"+d.getDate()).slice(-2);
+    return Utilities.formatDate(d, Session.getScriptTimeZone(), "yyyy-MM-dd");
+  }
   return null;
 }
 function isTimeString(s){ if(Object.prototype.toString.call(s)==="[object Date]" && s.getFullYear()===1899) return true; return /^\d{1,2}:\d{2}\s*(AM|PM)$/i.test(String(s).trim()); }

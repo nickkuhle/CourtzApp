@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react'
+import React, { useEffect } from 'react'
 
 function formatTimeLabel(totalMinutes) {
   const hours = Math.floor(totalMinutes / 60)
@@ -110,12 +110,6 @@ function Slot({ time, reservedBy = [], onClick, disabled, isOwnedByCurrentPlayer
 export default function CourtSchedule({ court, date, location, reservations, roster = [], currentPlayer = 'Alice Johnson', pendingReservations = {}, onReserve, onPreviousCourt, onNextCourt, canGoPrevious = false, canGoNext = false, onClose }) {
   if (!court) return null
 
-  const [selectedDuration, setSelectedDuration] = useState(location === 'Barnes Tennis Center' ? 30 : 60)
-
-  useEffect(() => {
-    setSelectedDuration(location === 'Barnes Tennis Center' ? 30 : 60)
-  }, [location])
-
   useEffect(() => {
     function handleKeyDown(event) {
       if (event.key === 'ArrowLeft' && canGoPrevious) onPreviousCourt?.()
@@ -140,12 +134,11 @@ export default function CourtSchedule({ court, date, location, reservations, ros
   const bookedCount = Object.values(reserved).reduce((acc, v) => acc + (Array.isArray(v) ? v.length : 0), 0)
   const myCount = Object.values(reserved).reduce((acc, v) => acc + (Array.isArray(v) && v.includes(currentPlayer) ? 1 : 0), 0)
 
-  const durationOptions = location === 'Barnes Tennis Center' ? [30] : [30, 60]
   const slots = []
   const start = 8 * 60 // 8:00
   const end = 18 * 60 // 6:00 PM
   for (let t = start; t <= end; t += 30) {
-    const endTime = t + selectedDuration
+    const endTime = t + 30
     const startLabel = formatTimeLabel(t)
     const endLabel = formatTimeLabel(endTime)
     slots.push({ label: `${startLabel}–${endLabel}`, start: t, end: endTime })
@@ -216,22 +209,7 @@ export default function CourtSchedule({ court, date, location, reservations, ros
               <span className="text-sm font-medium text-slate-600">Booking as</span>
               <span className="rounded-full bg-[#1f5f99]/10 px-3 py-1 text-sm font-semibold text-[#1f5f99]">{currentPlayer}</span>
             </div>
-            {durationOptions.length > 1 && (
-              <div className="flex items-center gap-2 ml-auto">
-                <label className="text-sm font-medium text-slate-600">Duration</label>
-                <div className="flex rounded-lg border border-slate-200 overflow-hidden">
-                  {durationOptions.map((d) => (
-                    <button
-                      key={d}
-                      onClick={() => setSelectedDuration(d)}
-                      className={`px-3 py-1.5 text-sm font-medium transition ${selectedDuration === d ? 'bg-[#1f5f99] text-white' : 'bg-white text-slate-600 hover:bg-slate-50'}`}
-                    >
-                      {d} min
-                    </button>
-                  ))}
-                </div>
-              </div>
-            )}
+            <span className="ml-auto rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-500">30-minute times</span>
           </div>
         </div>
 
