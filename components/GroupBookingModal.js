@@ -1,4 +1,6 @@
 import React, { useMemo, useState } from 'react'
+import PlayerChip from './PlayerChip'
+import { formatPlayerName } from '../lib/schedule-display'
 
 function XIcon() {
   return (
@@ -14,15 +16,6 @@ function SearchIcon() {
     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
       <circle cx="11" cy="11" r="8" />
       <line x1="21" y1="21" x2="16.65" y2="16.65" />
-    </svg>
-  )
-}
-
-function UserIcon() {
-  return (
-    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
-      <circle cx="12" cy="7" r="4" />
     </svg>
   )
 }
@@ -74,7 +67,7 @@ export default function GroupBookingModal({
     const selected = new Set(players)
     return roster
       .filter(n => !selected.has(n))
-      .filter(n => !q || n.toLowerCase().includes(q))
+      .filter(n => !q || `${n} ${formatPlayerName(n)}`.toLowerCase().includes(q))
       .slice(0, 30)
   }, [roster, players, search])
 
@@ -178,7 +171,7 @@ export default function GroupBookingModal({
             <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600">
               Booking <span className="font-semibold text-slate-800">{slots.join(' and ')}</span> on{' '}
               <span className="font-semibold text-slate-800">{subtitle}</span> for{' '}
-              <span className="font-semibold text-slate-800">{players.join(', ')}</span>.
+              <span className="font-semibold text-slate-800">{players.map(formatPlayerName).join(', ')}</span>.
             </div>
             <div className="flex items-center justify-end gap-3">
               <button
@@ -212,20 +205,14 @@ export default function GroupBookingModal({
                 ) : (
                   <div className="flex flex-wrap gap-2">
                     {players.map(name => (
-                      <span
-                        key={name}
-                        className={`inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-sm font-medium ${
-                          mode === 'cancel' ? 'bg-rose-50 text-rose-800 border border-rose-200' : 'bg-emerald-50 text-emerald-800 border border-emerald-200'
-                        }`}
-                      >
-                        <UserIcon />
-                        {name}
+                      <span key={name} className="inline-flex items-center gap-1 rounded-full">
+                        <PlayerChip name={name} />
                         {mode !== 'cancel' && !staffStep && (
                           <button
                             type="button"
                             onClick={() => removePlayer(name)}
-                            className="rounded-full hover:bg-emerald-200/70 p-0.5 -mr-0.5"
-                            aria-label={`Remove ${name}`}
+                            className="-ml-3 rounded-full border border-white bg-slate-200 p-1 text-slate-600 shadow-sm hover:bg-rose-100 hover:text-rose-700"
+                            aria-label={`Remove ${formatPlayerName(name)}`}
                           >
                             <XIcon />
                           </button>
@@ -271,7 +258,7 @@ export default function GroupBookingModal({
                               onMouseDown={() => addPlayer(name)}
                               className="w-full text-left px-3 py-2 text-sm text-slate-700 hover:bg-emerald-50 transition"
                             >
-                              {name}
+                              {formatPlayerName(name)}
                             </button>
                           ))
                         )}

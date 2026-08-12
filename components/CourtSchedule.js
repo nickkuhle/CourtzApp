@@ -1,5 +1,7 @@
 import React, { useEffect } from 'react'
 import { existingPlayerSessions, MAX_SESSIONS_PER_DAY } from '../lib/booking-rules'
+import PlayerChip from './PlayerChip'
+import { courtSessionBlocks, formatPlayerName } from '../lib/schedule-display'
 
 function formatTimeLabel(totalMinutes) {
   const hours = Math.floor(totalMinutes / 60)
@@ -15,15 +17,6 @@ function ClockIcon() {
     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
       <circle cx="12" cy="12" r="10" />
       <polyline points="12 6 12 12 16 14" />
-    </svg>
-  )
-}
-
-function UserIcon() {
-  return (
-    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
-      <circle cx="12" cy="7" r="4" />
     </svg>
   )
 }
@@ -53,7 +46,7 @@ function SpinnerIcon() {
   )
 }
 
-function Slot({ time, reservedBy = [], onClick, disabled, ended, isOwnedByCurrentPlayer, isSaving }) {
+function Slot({ time, reservedBy = [], currentPlayer, onClick, disabled, ended, isOwnedByCurrentPlayer, isSaving }) {
   const count = Array.isArray(reservedBy) ? reservedBy.length : 0
   const busy = count > 0
 
@@ -98,9 +91,10 @@ function Slot({ time, reservedBy = [], onClick, disabled, ended, isOwnedByCurren
             <span>{time}</span>
           </div>
           {busy && reservedBy.length > 0 && (
-            <div className="flex items-center gap-1 mt-1.5 text-xs text-slate-500">
-              <UserIcon />
-              <span className="truncate">{reservedBy.join(', ')}</span>
+            <div className="mt-2 flex flex-wrap gap-1.5">
+              {reservedBy.map((name) => (
+                <PlayerChip key={name} name={name} compact highlight={name === currentPlayer} />
+              ))}
             </div>
           )}
         </div>
@@ -152,8 +146,9 @@ export default function CourtSchedule({ court, date, location, reservations, cur
     for (let t = start; t <= end; t += 30) count++
     return count
   })()
-  const bookedCount = Object.values(reserved).reduce((acc, v) => acc + (Array.isArray(v) ? v.length : 0), 0)
+  const bookedCount = Object.values(reserved).filter((v) => Array.isArray(v) && v.length > 0).length
   const myCount = Object.values(reserved).reduce((acc, v) => acc + (Array.isArray(v) && v.includes(currentPlayer) ? 1 : 0), 0)
+  const sessionBlocks = courtSessionBlocks(reservations, { dateKey: date, location, court })
 
   const slots = []
   const start = 8 * 60 // 8:00
@@ -240,13 +235,48 @@ export default function CourtSchedule({ court, date, location, reservations, cur
           <div className="flex flex-wrap items-center gap-3">
             <div className="flex items-center gap-2">
               <span className="text-sm font-medium text-slate-600">Booking Courts As</span>
-              <span className="rounded-full bg-[#1f5f99]/10 px-3 py-1 text-sm font-semibold text-[#1f5f99]">{currentPlayer}</span>
+              <span className="rounded-full bg-[#1f5f99]/10 px-3 py-1 text-sm font-semibold text-[#1f5f99]">{formatPlayerName(currentPlayer)}</span>
             </div>
             <span className="ml-auto rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-500">
               {barnesOnly30 ? '30-minute times — Barnes allows one 30-minute session per reservation' : '30-minute times'}
             </span>
           </div>
         </div>
+
+        {/* Consecutive non-Barnes slots are summarized as a single 60-minute
+            session. Barnes reservations always remain individual 30-minute
+            blocks. The slot grid below stays available for the existing book
+            and cancel interactions. */}
+        {sessionBlocks.length > 0 && (
+          <div className="shrink-0 border-b border-slate-100 bg-slate-50/80 px-6 py-4">
+            <div className="mb-2 flex items-center justify-between gap-3">
+              <div>
+                <h3 className="text-xs font-bold uppercase tracking-wider text-slate-600">Reserved sessions</h3>
+                <p className="text-[11px] text-slate-400">Consecutive times are grouped by player.</p>
+              </div>
+              <span className="rounded-full bg-white px-2.5 py-1 text-xs font-bold text-slate-500 shadow-sm">{sessionBlocks.length}</span>
+            </div>
+            <div className="grid max-h-40 gap-2 overflow-auto sm:grid-cols-2">
+              {sessionBlocks.map((block) => {
+                const mine = block.players.includes(currentPlayer)
+                return (
+                  <div
+                    key={`${block.start}|${block.slots.join(',')}`}
+                    className={`rounded-xl border px-3 py-2.5 ${mine ? 'border-emerald-300 bg-emerald-50' : 'border-slate-200 bg-white'}`}
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-sm font-bold text-slate-800">{block.timeRange}</span>
+                      <span className="text-[10px] font-bold uppercase tracking-wide text-slate-400">{block.slots.length === 2 ? '60 min' : '30 min'}</span>
+                    </div>
+                    <div className="mt-2 flex flex-wrap gap-1.5">
+                      {block.players.map((name) => <PlayerChip key={name} name={name} compact highlight={name === currentPlayer} />)}
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          </div>
+        )}
 
         {/* Slot grid */}
         <div className="p-6 overflow-auto flex-1">
@@ -263,6 +293,7 @@ export default function CourtSchedule({ court, date, location, reservations, cur
                   key={slot.label}
                   time={slot.label}
                   reservedBy={players}
+                  currentPlayer={currentPlayer}
                   disabled={isReservedBySomeoneElse || isSaving}
                   ended={ended}
                   isOwnedByCurrentPlayer={isOwnedByCurrentPlayer}
@@ -277,7 +308,7 @@ export default function CourtSchedule({ court, date, location, reservations, cur
                       return
                     }
                     if (isReservedBySomeoneElse) {
-                      alert(`That slot is reserved by ${players.join(', ')}. You can only manage your own bookings.`)
+                      alert(`That slot is reserved by ${players.map(formatPlayerName).join(', ')}. You can only manage your own bookings.`)
                       return
                     }
                     if (isOwnedByCurrentPlayer) {
