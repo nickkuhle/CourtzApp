@@ -24,7 +24,7 @@ afterEach(() => {
   else process.env.SHEETS_WEBAPP_URL = originalWebAppUrl
 })
 
-test('loads reservations and roster from the supplied Apps Script URL', async () => {
+test('loads reservations, roster, dates and courts from the supplied Apps Script URL', async () => {
   delete process.env.SHEETS_WEBAPP_URL
   let requestedUrl = ''
   global.fetch = async (url, options) => {
@@ -32,15 +32,24 @@ test('loads reservations and roster from the supplied Apps Script URL', async ()
     assert.equal(options.cache, 'no-store')
     return jsonResponse({
       success: true,
-      version: '1.1',
-      roster: ['Abbey, Stephanie'],
-      reservations: {
-        'Barnes Tennis Center|2001-08-11|4': {
-          '8:00 AM–8:30 AM': ['Abbey, Stephanie'],
+      version: '2.0',
+      data: {
+        roster: ['Abbey, Stephanie'],
+        reservations: {
+          'Barnes Tennis Center|2001-08-11|4': {
+            '8:00 AM–8:30 AM': ['Abbey, Stephanie'],
+          },
+          'Barnes Tennis Center|2026-08-11|4': {
+            '8:00 AM–8:30 AM': ['Abbey, Stephanie', 'Andreoli, Mia'],
+          },
         },
-        'Barnes Tennis Center|2026-08-11|4': {
-          '8:00 AM–8:30 AM': ['Abbey, Stephanie', 'Andreoli, Mia'],
+        days: ['2026-08-10', '2026-08-11', '2026-08-12', '2026-08-15'],
+        courtsByDate: {
+          '2026-08-10': { 'Barnes Tennis Center': [4, 5] },
+          '2026-08-11': { 'Barnes Tennis Center': [4, 5] },
+          '2026-08-12': { 'Barnes Tennis Center': [4, 5, 6] }, // empty court 6
         },
+        locations: ['Barnes Tennis Center', 'Peninsula Tennis Club'],
       },
     })
   }
@@ -49,10 +58,14 @@ test('loads reservations and roster from the supplied Apps Script URL', async ()
   const schedule = await getSchedule()
 
   assert.match(requestedUrl, /AKfycbzlHIg__YqQdq9ohWvFdu9wCZZ27S5XPTYeBCV3y9IdDx1AZmZjs7vaV3rcZVz2lFaW6g/)
-  assert.match(requestedUrl, /action=getAll/)
+  assert.match(requestedUrl, /action=getSchedule/)
   assert.equal(schedule.connected, true)
   assert.equal(schedule.source, 'webapp')
+  assert.equal(schedule.scriptVersion, '2.0')
   assert.deepEqual(schedule.roster, ['Abbey, Stephanie'])
+  assert.deepEqual(schedule.days, ['2026-08-10', '2026-08-11', '2026-08-12', '2026-08-15'])
+  assert.deepEqual(schedule.courtsByDate['2026-08-12']['Barnes Tennis Center'], [4, 5, 6])
+  assert.deepEqual(schedule.locations, ['Barnes Tennis Center', 'Peninsula Tennis Club'])
   assert.deepEqual(
     schedule.reservations['Barnes Tennis Center|2026-08-11|4']['8:00 AM–8:30 AM'],
     ['Abbey, Stephanie', 'Andreoli, Mia'],
@@ -60,12 +73,92 @@ test('loads reservations and roster from the supplied Apps Script URL', async ()
   assert.equal(schedule.reservations['Barnes Tennis Center|2001-08-11|4'], undefined)
 })
 
-test('writes a reservation to Apps Script', async () => {
+test('derives days and courts from reservations when talking to a legacy deployment', async () => {
+  delete process.env.SHEETS_WEBAPP_URL
+  global.fetch = async (url) => {
+    if (String(url).includes('action=getAll')) {
+      return jsonResponse({
+        success: true,
+        version: '1.2',
+        roster: ['Abbey, Stephanie'],
+        reservations: {
+          'Barnes Tennis Center|2026-08-11|4': { '8:00 AM–8:30 AM': ['Abbey, Stephanie'] },
+        },
+      })
+    }
+    return jsonResponse({ success: true, version: '1.2', data: null })
+  }
+
+  const { getSchedule } = await loadFreshSheetsModule('legacy-read')
+  const schedule = await getSchedule()
+
+  assert.equal(schedule.connected, true)
+  assert.ok(schedule.days.includes('2026-08-11'))
+  assert.deepEqual(schedule.courtsByDate['2026-08-11']['Barnes Tennis Center'], [4])
+  assert.deepEqual(schedule.locations, ['Barnes Tennis Center'])
+})
+
+test('books a whole group atomically via bookGroup', async () => {
   delete process.env.SHEETS_WEBAPP_URL
   let request
   global.fetch = async (url, options) => {
     request = { url: String(url), options }
-    return jsonResponse({ success: true, version: '1.1' })
+    return jsonResponse({ success: true, version: '2.0' })
+  }
+
+  const { bookGroup } = await loadFreshSheetsModule('group-book')
+  await bookGroup({
+    location: 'Barnes Tennis Center',
+    date: '2026-08-15',
+    courtId: 6,
+    slots: ['8:00 AM–8:30 AM', '8:30 AM–9:00 AM'],
+    names: ['Abbey, Stephanie', 'Chen, Alice'],
+  })
+
+  assert.equal(request.options.method, 'POST')
+  assert.deepEqual(JSON.parse(request.options.body), {
+    action: 'bookGroup',
+    location: 'Barnes Tennis Center',
+    date: '2026-08-15',
+    courtId: '6',
+    slots: ['8:00 AM–8:30 AM', '8:30 AM–9:00 AM'],
+    names: ['Abbey, Stephanie', 'Chen, Alice'],
+  })
+})
+
+test('cancels a whole group atomically via cancelGroup', async () => {
+  delete process.env.SHEETS_WEBAPP_URL
+  let request
+  global.fetch = async (url, options) => {
+    request = { url: String(url), options }
+    return jsonResponse({ success: true, version: '2.0' })
+  }
+
+  const { cancelGroup } = await loadFreshSheetsModule('group-cancel')
+  await cancelGroup({
+    location: 'Barnes Tennis Center',
+    date: '2026-08-15',
+    courtId: 6,
+    slots: ['8:00 AM–8:30 AM'],
+    names: ['Abbey, Stephanie', 'Chen, Alice'],
+  })
+
+  assert.deepEqual(JSON.parse(request.options.body), {
+    action: 'cancelGroup',
+    location: 'Barnes Tennis Center',
+    date: '2026-08-15',
+    courtId: '6',
+    slots: ['8:00 AM–8:30 AM'],
+    names: ['Abbey, Stephanie', 'Chen, Alice'],
+  })
+})
+
+test('writes a single reservation to Apps Script (legacy toggle)', async () => {
+  delete process.env.SHEETS_WEBAPP_URL
+  let request
+  global.fetch = async (url, options) => {
+    request = { url: String(url), options }
+    return jsonResponse({ success: true, version: '2.0' })
   }
 
   const { toggleReservation } = await loadFreshSheetsModule('write')
@@ -89,7 +182,7 @@ test('writes a reservation to Apps Script', async () => {
   })
 })
 
-test('retries the copied sheet legacy 2001 date when Apps Script v1.1 cannot find 2026', async () => {
+test('retries the copied sheet legacy 2001 date when an old deployment cannot find 2026', async () => {
   delete process.env.SHEETS_WEBAPP_URL
   const postedDates = []
   global.fetch = async (url, options) => {
@@ -98,7 +191,7 @@ test('retries the copied sheet legacy 2001 date when Apps Script v1.1 cannot fin
     if (postedDates.length === 1) {
       return jsonResponse({ success: false, error: 'Error: Date not found in sheet: 2026-08-11 on Barnes TC' })
     }
-    return jsonResponse({ success: true, version: '1.1' })
+    return jsonResponse({ success: true, version: '1.2' })
   }
 
   const { toggleReservation } = await loadFreshSheetsModule('legacy-write')

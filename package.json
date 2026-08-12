@@ -4,7 +4,8 @@
     "dev": "next",
     "build": "next build",
     "start": "next start",
-    "test": "node --test"
+    "test": "node --test",
+    "mock:sheets": "node scripts/mock-apps-script.mjs"
   },
   "dependencies": {
     "googleapis": "^174.0.1",

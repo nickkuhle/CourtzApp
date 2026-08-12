@@ -107,7 +107,11 @@ function Slot({ time, reservedBy = [], onClick, disabled, isOwnedByCurrentPlayer
   )
 }
 
-export default function CourtSchedule({ court, date, location, reservations, roster = [], currentPlayer = 'Alice Johnson', pendingReservations = {}, onReserve, onPreviousCourt, onNextCourt, canGoPrevious = false, canGoNext = false, onClose }) {
+// Slot clicks are handed to the parent, which opens the shared group-booking
+// dialog: open slots start a booking with the signed-in player; slots the
+// signed-in player already holds open the cancellation dialog for the whole
+// group booked in that slot.
+export default function CourtSchedule({ court, date, location, reservations, currentPlayer = 'Alice Johnson', pendingReservations = {}, onOpenBooking, onPreviousCourt, onNextCourt, canGoPrevious = false, canGoNext = false, onClose }) {
   if (!court) return null
 
   useEffect(() => {
@@ -231,33 +235,15 @@ export default function CourtSchedule({ court, date, location, reservations, ros
                   isOwnedByCurrentPlayer={isOwnedByCurrentPlayer}
                   isSaving={isSaving}
                   onClick={() => {
-                    if (isOwnedByCurrentPlayer) {
-                      if (confirm(`Cancel your reservation at ${slot.label}?`)) {
-                        onReserve(court, slot.label, currentPlayer)
-                      }
-                      return
-                    }
                     if (isReservedBySomeoneElse) {
                       alert(`That slot is reserved by ${players.join(', ')}. You can only manage your own bookings.`)
                       return
                     }
-
-                    const keyPrefix = `${location}|${date}`
-                    const playerCountToday = Object.keys(reservations).reduce((acc, k) => {
-                      if (!k.startsWith(keyPrefix)) return acc
-                      const slotsForCourt = reservations[k] || {}
-                      Object.values(slotsForCourt).forEach((arr) => {
-                        if (Array.isArray(arr) && arr.includes(currentPlayer)) acc++
-                      })
-                      return acc
-                    }, 0)
-
-                    if (playerCountToday >= 2) {
-                      alert('You already have 2 sessions today.')
+                    if (isOwnedByCurrentPlayer) {
+                      onOpenBooking({ mode: 'cancel', slots: [slot.label], players: [...new Set(players)] })
                       return
                     }
-
-                    onReserve(court, slot.label, currentPlayer)
+                    onOpenBooking({ mode: 'book', slots: [slot.label], players: [currentPlayer] })
                   }}
                 />
               )

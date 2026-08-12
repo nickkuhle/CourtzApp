@@ -1,9 +1,10 @@
 // Courtz App - Google Sheets Backend (GRID VERSION for actual sheet)
-// SHEET_ID: 1U3TcsbIhQ9lxeo0_LtHYTldIqbkWg2Je
+// SHEET_ID: 1U3TcsbIhQ9lxeo0_LtHYTldIqbkWg2Je  (TEST COPY - do not point at the real sheet)
 // Bump SCRIPT_VERSION on every edit so the app (and you) can verify which
 // deployment is actually live via WEBAPP_URL?action=ping.
-const SCRIPT_VERSION = "1.2";
+const SCRIPT_VERSION = "2.0";
 const SHEET_ID = "1U3TcsbIhQ9lxeo0_LtHYTldIqbkWg2Je";
+const DEFAULT_TOURNAMENT_YEAR = "2026";
 const LOCATION_MAP = {
   "Barnes TC": "Barnes Tennis Center",
   "Peninsula Tennis Club": "Peninsula Tennis Club",
@@ -12,13 +13,15 @@ const LOCATION_MAP = {
   "Balboa Tennis": "Balboa Tennis Center",
   "USD": "USD"
 };
+const COURT_TABS = Object.keys(LOCATION_MAP);
+const MONTHS = { jan:"01", feb:"02", mar:"03", apr:"04", may:"05", jun:"06", jul:"07", aug:"08", sep:"09", oct:"10", nov:"11", dec:"12" };
 
 function jsonResponse(data) {
   return ContentService.createTextOutput(JSON.stringify(data)).setMimeType(ContentService.MimeType.JSON);
 }
 
 function doGet(e) {
-  const action = e.parameter.action || "getAll";
+  const action = e.parameter.action || "getSchedule";
   const ss = SpreadsheetApp.openById(SHEET_ID);
   try {
     if (action === "ping") {
@@ -35,10 +38,26 @@ function doGet(e) {
       const roster = getRosterData(ss);
       return jsonResponse({ success: true, version: SCRIPT_VERSION, data: roster });
     }
+    if (action === "getSchedule") {
+      const result = readFullSchedule(ss);
+      return jsonResponse({ success: true, version: SCRIPT_VERSION, data: result });
+    }
     if (action === "getAll" || action === "getReservations") {
+      // Backwards-compatible payload used by older app builds.
       const roster = getRosterData(ss).map(r => r.Name || r.name).filter(Boolean);
       const reservations = getAllReservations(ss);
       return jsonResponse({ success: true, version: SCRIPT_VERSION, roster: roster, reservations: reservations });
+    }
+    if (action === "dumpGrid") {
+      // Debug aid: ?action=dumpGrid&sheet=<Tab Name> returns the raw grid of one
+      // tab so a layout problem can be inspected after a redeploy.
+      const sheetName = e.parameter.sheet;
+      const tabs = ss.getSheets();
+      const sh = sheetName ? tabs.find(t => t.getName().toLowerCase() === String(sheetName).toLowerCase()) : null;
+      if (sheetName && !sh) return jsonResponse({ success: false, version: SCRIPT_VERSION, error: "Tab not found: " + sheetName, tabs: tabs.map(t => t.getName()) });
+      const target = sh || tabs[0];
+      const values = target.getDataRange().getValues();
+      return jsonResponse({ success: true, version: SCRIPT_VERSION, sheet: target.getName(), values: values });
     }
     return jsonResponse({ success: false, version: SCRIPT_VERSION, error: "Unknown action: " + action });
   } catch (err) {
@@ -50,18 +69,25 @@ function doPost(e) {
   const ss = SpreadsheetApp.openById(SHEET_ID);
   try {
     const data = JSON.parse(e.postData.contents);
-    if (data.action === "toggleReservation") {
-      // Serialise writes so two admins cannot claim the same open cell at once.
-      const lock = LockService.getDocumentLock();
-      lock.waitLock(10000);
-      try {
-        toggleGridReservation(ss, data); // data: {location, date, courtId, slot, name}
-      } finally {
-        lock.releaseLock();
+    // Serialise writes so two admins cannot claim the same open cell at once.
+    const lock = LockService.getDocumentLock();
+    lock.waitLock(15000);
+    try {
+      if (data.action === "bookGroup") {
+        bookGroup(ss, data); // data: {location, date, courtId, slots: [], names: []}
+        return jsonResponse({ success: true, version: SCRIPT_VERSION, action: "bookGroup" });
       }
-      // Do not re-parse every tab after a one-cell update. The app updates this
-      // slot optimistically; its next read supplies the complete fresh schedule.
-      return jsonResponse({ success: true, version: SCRIPT_VERSION });
+      if (data.action === "cancelGroup") {
+        cancelGroup(ss, data); // data: {location, date, courtId, slots: [], names: []}
+        return jsonResponse({ success: true, version: SCRIPT_VERSION, action: "cancelGroup" });
+      }
+      if (data.action === "toggleReservation") {
+        // Single-player toggle kept for older app builds.
+        toggleGridReservation(ss, data); // data: {location, date, courtId, slot, name}
+        return jsonResponse({ success: true, version: SCRIPT_VERSION, action: "toggleReservation" });
+      }
+    } finally {
+      lock.releaseLock();
     }
     return jsonResponse({ success: false, version: SCRIPT_VERSION, error: "Unknown POST action" });
   } catch (err) {
@@ -75,156 +101,405 @@ function getRosterData(ss) {
   const values = sheet.getDataRange().getValues();
   if (values.length < 2) return [];
   // First row is header "Name"
-  return values.slice(1).filter(r => String(r[0]).trim() !== "").map((r, idx) => ({ _rowIndex: idx+2, Name: String(r[0]).trim() }));
+  return values.slice(1).filter(r => String(r[0]).trim() !== "").map((r, idx) => ({ _rowIndex: idx + 2, Name: String(r[0]).trim() }));
 }
 
-// --- GRID PARSER ---
-function getAllReservations(ss) {
+// --- SCHEDULE ---
+// Reads every court-location tab and returns reservations plus the full list of
+// dates and courts found in the sheet (including dates/courts with no bookings).
+function readFullSchedule(ss) {
   const all = {};
-  const sheetNames = ["Barnes TC","Peninsula Tennis Club","Point Loma Nazarene College","Pacific Beach TC","Balboa Tennis","USD"];
-  sheetNames.forEach(name => {
+  const datesSet = {};
+  const courtsByDate = {};
+  COURT_TABS.forEach(name => {
     const sh = ss.getSheetByName(name);
     if (!sh) return;
     const values = sh.getDataRange().getValues();
     const parsed = parseGridValues(values, name);
-    for (const k in parsed) {
+    const location = LOCATION_MAP[name] || name;
+
+    // Merge reservations
+    for (const k in parsed.reservations) {
       if (!all[k]) all[k] = {};
-      for (const slot in parsed[k]) {
+      for (const slot in parsed.reservations[k]) {
         if (!all[k][slot]) all[k][slot] = [];
-        parsed[k][slot].forEach(n => { if (all[k][slot].indexOf(n)===-1) all[k][slot].push(n); });
+        parsed.reservations[k][slot].forEach(n => { if (all[k][slot].indexOf(n) === -1) all[k][slot].push(n); });
+      }
+    }
+    // Merge dates
+    parsed.dates.forEach(d => { datesSet[d] = true; });
+    // Merge courts per date
+    for (const d in parsed.courtsByDate) {
+      if (!courtsByDate[d]) courtsByDate[d] = {};
+      if (!courtsByDate[d][location]) courtsByDate[d][location] = [];
+      parsed.courtsByDate[d][location].forEach(c => {
+        if (courtsByDate[d][location].indexOf(c) === -1) courtsByDate[d][location].push(c);
+      });
+    }
+  });
+
+  const roster = getRosterData(ss).map(r => r.Name || r.name).filter(Boolean);
+  const days = Object.keys(datesSet).sort();
+  return {
+    roster: roster,
+    reservations: all,
+    days: days,
+    courtsByDate: courtsByDate,
+    locations: COURT_TABS.map(name => LOCATION_MAP[name] || name)
+  };
+}
+
+// Backwards-compatible reservations-only read.
+function getAllReservations(ss) {
+  const all = {};
+  COURT_TABS.forEach(name => {
+    const sh = ss.getSheetByName(name);
+    if (!sh) return;
+    const values = sh.getDataRange().getValues();
+    const parsed = parseGridValues(values, name);
+    for (const k in parsed.reservations) {
+      if (!all[k]) all[k] = {};
+      for (const slot in parsed.reservations[k]) {
+        if (!all[k][slot]) all[k][slot] = [];
+        parsed.reservations[k][slot].forEach(n => { if (all[k][slot].indexOf(n) === -1) all[k][slot].push(n); });
       }
     }
   });
   return all;
 }
 
+// --- GRID PARSER (mirrors lib/sheets-grid-parser.js - keep in sync) ---
+// One date section looks like:
+//   ["Mon Aug 10", "", ...]                       <- date row
+//   ["", 4, "", 5, "", 6, "", ...]                <- court header (each court may span multiple columns)
+//   ["8:00 AM", "Name", "Name", ...]              <- 30-min slot row
+//   ["", "Name", ...]                             <- continuation row of the same slot
 function parseGridValues(values, sheetName) {
   const reservations = {};
   const location = LOCATION_MAP[sheetName] || sheetName;
-  let currentDate = null;
-  let courtColumns = {};
+  const sections = [];
+  const datesSeen = {};
+  let current = null;
+  let pendingHeader = null;
+
   for (let r = 0; r < values.length; r++) {
     const row = values[r];
-    if (!row || row.every(c => String(c||"").trim() === "" && Object.prototype.toString.call(c)!=="[object Date]")) continue;
-    // Detect court header BEFORE date - store whenever we see it
-    const hasCourts = row.some((c,i)=> i>0 && !isNaN(parseInt(String(c).trim())) && parseInt(String(c).trim())>0);
-    const isCourtHeader = hasCourts && (String(row[0]).trim()==="" || String(row[0]).toLowerCase()==="court");
-    if (isCourtHeader) {
-      courtColumns = {};
-      row.forEach((c,i)=>{ const n=parseInt(String(c).trim()); if(!isNaN(n)&&n>0&&n<30) courtColumns[n]=i; });
+    if (!row) continue;
+    let hasContent = false;
+    for (let c = 0; c < row.length; c++) { if (cellText(row[c]) !== "") { hasContent = true; break; } }
+    if (!hasContent) continue;
+
+    const firstRaw = row[0];
+    const date = parseSheetDate(firstRaw);
+    const firstIsTime = isTimeString(firstRaw);
+
+    if (date && !firstIsTime) {
+      // New date section
+      if (!current || current.date !== date) {
+        current = { date: date, row: r, headerRow: -1, courts: pendingHeader ? computeCourtSpans(pendingHeader.nums) : [] };
+        if (pendingHeader) { current.headerRow = pendingHeader.row; pendingHeader = null; }
+        sections.push(current);
+        datesSeen[date] = true;
+      }
+      // Some layouts put the courts on the same row as the date
+      const inlineNums = detectCourtNumbers(row);
+      if (inlineNums.length) {
+        current.courts = computeCourtSpans(inlineNums);
+        current.headerRow = r;
+      }
       continue;
     }
-    const maybeDate = parseSheetDate(row[0]);
-    const firstStr = String(row[0]||"").trim();
-    // Use maybeDate but ensure it's not a time Date (1899)
-    if (maybeDate && !isTimeString(row[0])) {
-      currentDate = maybeDate;
+
+    if (isCourtHeaderRow(row)) {
+      const nums = detectCourtNumbers(row);
+      if (current) {
+        current.courts = computeCourtSpans(nums);
+        current.headerRow = r;
+      } else {
+        pendingHeader = { nums: nums, row: r };
+      }
       continue;
     }
-    if (isTimeString(row[0]) && currentDate && Object.keys(courtColumns).length) {
-      const timeLabel = normalizeTime(row[0]);
-      const secondRow = values[r+1] || [];
-      const isSecondRowTime = isTimeString(String(secondRow[0]||"").trim());
-      const slot30 = timeLabel + "–" + addMinutes(timeLabel, 30);
-      for (const courtNum in courtColumns) {
-        const colIdx = courtColumns[courtNum];
+
+    if (firstIsTime && current && current.courts.length) {
+      const timeLabel = normalizeTime(firstRaw);
+      const slot30 = timeLabel + "\u2013" + addMinutes(timeLabel, 30);
+      const secondRow = values[r + 1];
+      const secondIsTime = secondRow ? isTimeString(secondRow[0]) : false;
+      const secondIsDate = secondRow ? (parseSheetDate(secondRow[0]) && !isTimeString(secondRow[0])) : false;
+      const twoRowSlot = secondRow ? !secondIsTime && !secondIsDate : false;
+
+      for (let ci = 0; ci < current.courts.length; ci++) {
+        const c = current.courts[ci];
         const names = [];
-        const cell1 = String(row[colIdx]||"").trim();
-        if (cell1) names.push(cell1);
-        if (!isSecondRowTime) {
-          const cell2 = String(secondRow[colIdx]||"").trim();
-          if (cell2) names.push(cell2);
+        for (let cj = 0; cj < c.cols.length; cj++) {
+          const v = cellText(row[c.cols[cj]]);
+          if (v) pushName(names, v);
+        }
+        if (twoRowSlot) {
+          for (let cj = 0; cj < c.cols.length; cj++) {
+            const v = cellText(secondRow[c.cols[cj]]);
+            if (v) pushName(names, v);
+          }
         }
         if (names.length) {
-          const key = location + "|" + currentDate + "|" + courtNum;
+          const key = location + "|" + current.date + "|" + c.court;
           if (!reservations[key]) reservations[key] = {};
           if (!reservations[key][slot30]) reservations[key][slot30] = [];
-          names.forEach(n => { if (reservations[key][slot30].indexOf(n)===-1) reservations[key][slot30].push(n); });
+          for (let ni = 0; ni < names.length; ni++) {
+            if (reservations[key][slot30].indexOf(names[ni]) === -1) reservations[key][slot30].push(names[ni]);
+          }
         }
       }
     }
   }
-  return reservations;
+
+  const courtsByDate = {};
+  for (let si = 0; si < sections.length; si++) {
+    const sec = sections[si];
+    if (!sec.courts.length) continue;
+    if (!courtsByDate[sec.date]) courtsByDate[sec.date] = {};
+    if (!courtsByDate[sec.date][location]) courtsByDate[sec.date][location] = [];
+    for (let ci = 0; ci < sec.courts.length; ci++) {
+      const id = sec.courts[ci].court;
+      if (courtsByDate[sec.date][location].indexOf(id) === -1) courtsByDate[sec.date][location].push(id);
+    }
+  }
+
+  return { reservations: reservations, dates: Object.keys(datesSeen), courtsByDate: courtsByDate, sections: sections };
 }
 
-function toggleGridReservation(ss, data) {
-  // data: {location, date, courtId, slot, name}
-  const sheetName = locationToSheet(data.location);
-  const sh = ss.getSheetByName(sheetName);
-  if (!sh) throw new Error("Sheet not found: " + sheetName);
-  const values = sh.getDataRange().getValues();
-  const targetDate = String(data.date).trim(); // YYYY-MM-DD
-  const courtId = String(data.courtId).trim();
-  const startLabel = String(data.slot).split("–")[0].split("-")[0].trim();
-  const startNorm = normalizeTime(startLabel);
-  const name = String(data.name).trim();
-
-  // Find date row
-  let dateRow = -1;
-  for (let r=0; r<values.length; r++) {
-    const parsed = parseSheetDate(values[r][0]);
-    if (parsed === targetDate) { dateRow = r; break; }
-  }
-  if (dateRow === -1) throw new Error("Date not found in sheet: " + targetDate + " on " + sheetName);
-  // Find court column - search backwards (header is BEFORE date) and forwards
-  let courtCol = -1;
-  let courtHeaderRow = -1;
-  // Search backwards up to 5 rows before date
-  for (let r=dateRow-1; r>=Math.max(0,dateRow-5); r--) {
-    const row = values[r];
-    for (let c=0; c<row.length; c++) {
-      if (String(row[c]).trim() === courtId) { courtCol = c; courtHeaderRow = r; break; }
-    }
-    if (courtCol !== -1) break;
-  }
-  // If not found backwards, search forwards
-  if (courtCol === -1) {
-    for (let r=dateRow+1; r<Math.min(dateRow+5, values.length); r++) {
-      const row = values[r];
-      for (let c=0; c<row.length; c++) {
-        if (String(row[c]).trim() === courtId) { courtCol = c; courtHeaderRow = r; break; }
-      }
-      if (courtCol !== -1) break;
-    }
-  }
-  if (courtCol === -1) throw new Error("Court " + courtId + " not found on " + sheetName + " for date " + targetDate);
-  // Find time row
-  // Find time row - start after dateRow (not courtHeaderRow, which is before date)
-  for (let r=dateRow+1; r<values.length; r++) {
-    const rawFirst = values[r][0];
-    const parsedDate = parseSheetDate(rawFirst);
-    if (parsedDate && r !== dateRow) break; // next date section
-    if (isTimeString(rawFirst) && normalizeTime(rawFirst) === startNorm) {
-      const cell1 = String(values[r][courtCol]||"").trim();
-      const secondRow = values[r+1] || [];
-      const isSecondRowTime = isTimeString(secondRow[0]);
-      const cell2 = !isSecondRowTime ? String(secondRow[courtCol]||"").trim() : null;
-
-      // If name already exists, delete it
-      if (cell1 === name) {
-        sh.getRange(r+1, courtCol+1).clearContent();
-        return true;
-      }
-      if (cell2 === name) {
-        sh.getRange(r+2, courtCol+1).clearContent();
-        return true;
-      }
-      // Otherwise add to first empty
-      if (!cell1) {
-        sh.getRange(r+1, courtCol+1).setValue(name);
-        return true;
-      }
-      if (cell2 !== null && !cell2) {
-        sh.getRange(r+2, courtCol+1).setValue(name);
-        return true;
-      }
-      throw new Error("Slot full at " + sheetName + " " + targetDate + " Court " + courtId + " " + data.slot);
-    }
-  }
-  throw new Error("Time slot not found: " + startNorm + " on " + sheetName + " " + targetDate);
+function cellText(cell) {
+  if (cell == null) return "";
+  if (Object.prototype.toString.call(cell) === "[object Date]" && !isNaN(cell)) return String(cell);
+  return String(cell).trim();
 }
 
-function locationToSheet(location){
+function pushName(list, raw) {
+  // One cell = one player. If several names were pasted into one cell separated
+  // by newlines, split on newlines only (commas belong inside "Last, First").
+  const parts = String(raw).split(/\r?\n/);
+  for (let i = 0; i < parts.length; i++) {
+    const p = parts[i].trim();
+    if (p && list.indexOf(p) === -1) list.push(p);
+  }
+}
+
+function detectCourtNumbers(row) {
+  const out = [];
+  for (let i = 0; i < row.length; i++) {
+    if (i === 0) continue;
+    const s = String(row[i] == null ? "" : row[i]).trim();
+    if (!s) continue;
+    let n = null;
+    if (/^\d{1,2}$/.test(s)) n = parseInt(s, 10);
+    else if (/^court\s*#?\s*\d{1,2}$/i.test(s)) n = parseInt(s.match(/\d+/)[0], 10);
+    if (n != null && n >= 1 && n <= 50) out.push({ n: n, idx: i });
+  }
+  return out;
+}
+
+function isCourtHeaderRow(row) {
+  const nums = detectCourtNumbers(row);
+  if (!nums.length) return false;
+  const first = String(row && row[0] != null ? row[0] : "").trim().toLowerCase();
+  if (!first) return true;
+  if (first === "court" || first === "courts") return true;
+  if (parseSheetDate(row[0])) return true;
+  return false;
+}
+
+function computeCourtSpans(nums) {
+  if (!nums || !nums.length) return [];
+  const widths = [];
+  for (let i = 0; i < nums.length - 1; i++) widths.push(nums[i + 1].idx - nums[i].idx);
+  let standard = 1;
+  if (widths.length) {
+    const counts = {};
+    widths.forEach(w => { counts[w] = (counts[w] || 0) + 1; });
+    let bestWidth = 1, bestCount = 0;
+    for (const w in counts) {
+      const ww = parseInt(w, 10);
+      if (counts[w] > bestCount || (counts[w] === bestCount && ww > bestWidth)) {
+        bestCount = counts[w];
+        bestWidth = ww;
+      }
+    }
+    standard = Math.max(1, bestWidth);
+  }
+  return nums.map(function (entry, i) {
+    const start = entry.idx;
+    let end;
+    if (i + 1 < nums.length) {
+      end = nums[i + 1].idx - 1;
+    } else {
+      end = start + standard - 1;
+    }
+    if (end < start) end = start;
+    const cols = [];
+    for (let c = start; c <= end; c++) cols.push(c);
+    return { court: entry.n, cols: cols };
+  });
+}
+
+// --- DATE / TIME HELPERS ---
+function parseSheetDate(cell) {
+  if (cell == null || cell === "") return null;
+  if (Object.prototype.toString.call(cell) === "[object Date]" && !isNaN(cell)) {
+    if (cell.getFullYear() === 1899) return null; // time, not date
+    // A few copied cells contain the hidden year 2001 even though their visible
+    // month/day belongs to this 2026 tournament.
+    if (cell.getFullYear() === 2001) {
+      return DEFAULT_TOURNAMENT_YEAR + "-" + ("0" + (cell.getMonth() + 1)).slice(-2) + "-" + ("0" + cell.getDate()).slice(-2);
+    }
+    return Utilities.formatDate(cell, Session.getScriptTimeZone(), "yyyy-MM-dd");
+  }
+  let s = String(cell).trim();
+  if (!s) return null;
+
+  // "2026-08-12" (ISO) - checked first so it is never seen as "01-08-13"
+  let m = s.match(/(\d{4})-(\d{2})-(\d{2})/);
+  if (m) return normYear(m[1]) + "-" + m[2] + "-" + m[3];
+
+  // "Mon Aug 10" / "Monday, August 10" / "Wed Aug 12, 2026"
+  m = s.match(/(?:[A-Za-z]{3,9})[\s,/]+([A-Za-z]{3,9})[\s,/]+(\d{1,2})(?:[\s,/]+(\d{2,4}))?/i);
+  if (m) {
+    const mon = MONTHS[m[1].toLowerCase().slice(0, 3)];
+    if (mon) {
+      const day = ("0" + m[2]).slice(-2);
+      const year = m[3] ? normYear(m[3]) : DEFAULT_TOURNAMENT_YEAR;
+      return year + "-" + mon + "-" + day;
+    }
+    const mon2 = MONTHS[m[0].toLowerCase().slice(0, 3)];
+    if (mon2) {
+      const day = ("0" + m[2]).slice(-2);
+      const year = m[3] ? normYear(m[3]) : DEFAULT_TOURNAMENT_YEAR;
+      return year + "-" + mon2 + "-" + day;
+    }
+    return null;
+  }
+  // "August 12" / "Aug 12" / "August 12, 2026"
+  m = s.match(/([A-Za-z]{3,9})[\s,/]+(\d{1,2})(?:[\s,/]+(\d{2,4}))?/);
+  if (m) {
+    const mon = MONTHS[m[1].toLowerCase().slice(0, 3)];
+    if (mon) {
+      const day = ("0" + m[2]).slice(-2);
+      const year = m[3] ? normYear(m[3]) : DEFAULT_TOURNAMENT_YEAR;
+      return year + "-" + mon + "-" + day;
+    }
+  }
+  // "Wed 8/12" / "8/12" / "8/12/2026" / "8/12/26" (never a substring of "2001-08-13")
+  m = s.match(/(?:^|[^\d])(\d{1,2})[\/\-](\d{1,2})(?:[\/\-](\d{2,4}))?(?=$|[^\d])/);
+  if (m) {
+    const mon = ("0" + m[1]).slice(-2);
+    const day = ("0" + m[2]).slice(-2);
+    const year = m[3] ? normYear(m[3]) : DEFAULT_TOURNAMENT_YEAR;
+    if (parseInt(mon, 10) <= 12 && parseInt(day, 10) <= 31) return year + "-" + mon + "-" + day;
+  }
+  return null;
+}
+
+function normYear(y) {
+  const n = parseInt(y, 10);
+  if (n === 2001) return DEFAULT_TOURNAMENT_YEAR;
+  if (n >= 100) return String(n);
+  return "20" + ("0" + n).slice(-2);
+}
+
+function isTimeString(s) {
+  if (s == null || s === "") return false;
+  if (Object.prototype.toString.call(s) === "[object Date]" && !isNaN(s)) return s.getFullYear() === 1899;
+  const t = String(s).trim();
+  if (!t) return false;
+  return /^\d{1,2}:\d{2}\s*(AM|PM)?$/i.test(t);
+}
+
+function normalizeTime(s) {
+  if (Object.prototype.toString.call(s) === "[object Date]" && !isNaN(s) && s.getFullYear() === 1899) {
+    let h = s.getHours(), m = s.getMinutes();
+    let ap = h >= 12 ? "PM" : "AM", dh = h % 12 === 0 ? 12 : h % 12;
+    return dh + ":" + (m < 10 ? "0" + m : m) + " " + ap;
+  }
+  let t = String(s).trim().toUpperCase();
+  if (/^\d{1,2}:\d{2}$/.test(t)) {
+    let h = parseInt(t.split(":")[0], 10), m = parseInt(t.split(":")[1], 10);
+    let ap = h >= 12 ? "PM" : "AM", dh = h % 12 === 0 ? 12 : h % 12;
+    return dh + ":" + (m < 10 ? "0" + m : m) + " " + ap;
+  }
+  t = t.replace(/(\d)(AM|PM)/, "$1 $2");
+  return t;
+}
+
+function timeToMinutes(timeStr) {
+  const m = String(timeStr).match(/(\d{1,2}):(\d{2})\s*(AM|PM)?/i);
+  if (!m) return NaN;
+  let h = parseInt(m[1], 10);
+  const min = parseInt(m[2], 10);
+  const ap = (m[3] || "").toUpperCase();
+  if (ap === "PM" && h !== 12) h += 12;
+  if (ap === "AM" && h === 12) h = 0;
+  return h * 60 + min;
+}
+
+function addMinutes(timeStr, mins) {
+  const base = timeToMinutes(timeStr);
+  if (isNaN(base)) return timeStr;
+  const total = base + mins;
+  let nh = Math.floor(total / 60) % 24, nm = total % 60;
+  let nap = nh >= 12 ? "PM" : "AM", dh = nh % 12 === 0 ? 12 : nh % 12;
+  return dh + ":" + (nm < 10 ? "0" + nm : nm) + " " + nap;
+}
+
+function slotStartLabel(slot) {
+  return String(slot).split(/[\u2013-]/)[0].trim();
+}
+
+// --- WRITES ---
+// Finds the section/court/time cells for one booking on the (already-read)
+// grid `values`. Returns { section, court, cells: [{row, col, value}] } or null.
+function locateSlotCells(values, date, courtId, startNorm) {
+  const targetDate = String(date);
+  const parsed = parseGridValues(values, "");
+  let section = null;
+  for (let i = 0; i < parsed.sections.length; i++) {
+    if (parsed.sections[i].date === targetDate) { section = parsed.sections[i]; break; }
+  }
+  if (!section) return null;
+  let court = null;
+  for (let i = 0; i < section.courts.length; i++) {
+    if (String(section.courts[i].court) === String(courtId)) { court = section.courts[i]; break; }
+  }
+  if (!court) return null;
+
+  let sectionEnd = values.length;
+  for (let i = 0; i < parsed.sections.length; i++) {
+    const sec = parsed.sections[i];
+    if (sec.date !== targetDate && sec.row > section.row) { sectionEnd = sec.row; break; }
+  }
+
+  let timeRow = -1;
+  for (let r = Math.max(section.row + 1, 0); r < sectionEnd; r++) {
+    if (isTimeString(values[r][0]) && normalizeTime(values[r][0]) === startNorm) { timeRow = r; break; }
+  }
+  if (timeRow === -1) return null;
+
+  const rows = [timeRow];
+  const next = values[timeRow + 1];
+  const nextIsTime = next ? isTimeString(next[0]) : false;
+  const nextIsDate = next ? (parseSheetDate(next[0]) && !isTimeString(next[0])) : false;
+  if (next && !nextIsTime && !nextIsDate) rows.push(timeRow + 1);
+
+  const cells = [];
+  for (let ri = 0; ri < rows.length; ri++) {
+    for (let ci = 0; ci < court.cols.length; ci++) {
+      const col = court.cols[ci];
+      cells.push({ row: rows[ri], col: col, value: values[rows[ri]] ? cellText(values[rows[ri]][col]) : "" });
+    }
+  }
+  return { section: section, court: court, cells: cells };
+}
+
+function locationToSheet(location) {
   if (location.indexOf("Barnes") !== -1) return "Barnes TC";
   if (location.indexOf("Peninsula") !== -1) return "Peninsula Tennis Club";
   if (location.indexOf("Point Loma") !== -1) return "Point Loma Nazarene College";
@@ -233,41 +508,139 @@ function locationToSheet(location){
   if (location.indexOf("USD") !== -1) return "USD";
   return location;
 }
-function parseSheetDate(cell){
-  if (cell==null || cell==="") return null;
-  if (Object.prototype.toString.call(cell) === "[object Date]" && !isNaN(cell)) {
-    if (cell.getFullYear() === 1899) return null; // time, not date
-    // A few copied cells contain the hidden year 2001 even though their visible
-    // month/day belongs to this 2026 tournament.
-    if (cell.getFullYear() === 2001) {
-      return "2026-" + ("0" + (cell.getMonth()+1)).slice(-2) + "-" + ("0" + cell.getDate()).slice(-2);
-    }
-    return Utilities.formatDate(cell, Session.getScriptTimeZone(), "yyyy-MM-dd");
-  }
-  let s = String(cell).trim();
-  const months={jan:"01",feb:"02",mar:"03",apr:"04",may:"05",jun:"06",jul:"07",aug:"08",sep:"09",oct:"10",nov:"11",dec:"12"};
-  const m=s.match(/(?:Sun|Mon|Tue|Wed|Thu|Fri|Sat)\s+([A-Za-z]+)\s+(\d{1,2})/i);
-  if(m){ const mon=months[m[1].toLowerCase().slice(0,3)]; const day=("0"+m[2]).slice(-2); return "2026-"+mon+"-"+day; }
-  const iso=s.match(/(\d{4})-(\d{2})-(\d{2})/);
-  if(iso) return (iso[1] === "2001" ? "2026" : iso[1]) + "-" + iso[2] + "-" + iso[3];
-  const mdY=s.match(/(\d{1,2})\/(\d{1,2})\/(\d{4})/);
-  if(mdY) return (mdY[3] === "2001" ? "2026" : mdY[3]) + "-" + ("0"+mdY[1]).slice(-2) + "-" + ("0"+mdY[2]).slice(-2);
-  const d=new Date(s);
-  if(!isNaN(d.getTime()) && s.length>6 && d.getFullYear()>2000) {
-    if(d.getFullYear() === 2001) return "2026-" + ("0"+(d.getMonth()+1)).slice(-2) + "-" + ("0"+d.getDate()).slice(-2);
-    return Utilities.formatDate(d, Session.getScriptTimeZone(), "yyyy-MM-dd");
-  }
-  return null;
+
+function cleanNames(names) {
+  const out = [];
+  (names || []).forEach(n => {
+    const v = String(n).trim();
+    if (v && out.indexOf(v) === -1) out.push(v);
+  });
+  return out;
 }
-function isTimeString(s){ if(Object.prototype.toString.call(s)==="[object Date]" && s.getFullYear()===1899) return true; return /^\d{1,2}:\d{2}\s*(AM|PM)$/i.test(String(s).trim()); }
-function normalizeTime(s){ if(Object.prototype.toString.call(s)==="[object Date]" && s.getFullYear()===1899){ let h=s.getHours(), m=s.getMinutes(); let ap=h>=12?"PM":"AM", dh=h%12===0?12:h%12; return dh+":"+(m<10?"0"+m:m)+" "+ap; } let t=String(s).trim().toUpperCase(); t=t.replace(/(\d)(AM|PM)/,"$1 $2"); return t; }
-function addMinutes(timeStr, mins){
-  const parts=timeStr.split(" ");
-  let h=parseInt(parts[0].split(":")[0]), m=parseInt(parts[0].split(":")[1]), ap=parts[1];
-  if(ap==="PM" && h!==12) h+=12;
-  if(ap==="AM" && h===12) h=0;
-  let total=h*60+m+mins;
-  let nh=Math.floor(total/60)%24, nm=total%60;
-  let nap=nh>=12?"PM":"AM", dh=nh%12===0?12:nh%12;
-  return dh+":"+("0"+nm).slice(-2)+" "+nap;
+
+function cleanSlots(slots) {
+  const out = [];
+  (slots || []).forEach(s => {
+    const v = String(s).trim();
+    if (v && out.indexOf(v) === -1) out.push(v);
+  });
+  return out;
+}
+
+// Atomic group booking: every name is written to every requested 30-minute part,
+// or nothing is written at all (on any conflict/error the partial cells are
+// cleared again).
+function bookGroup(ss, data) {
+  const sheetName = locationToSheet(data.location);
+  const sh = ss.getSheetByName(sheetName);
+  if (!sh) throw new Error("Sheet not found: " + sheetName);
+  const values = sh.getDataRange().getValues();
+  const names = cleanNames(data.names);
+  const slots = cleanSlots(data.slots);
+  if (!names.length) throw new Error("No players given");
+  if (!slots.length) throw new Error("No time slots given");
+
+  // Verify every part is fully open and plan the writes.
+  const plan = []; // {row, col, name}
+  const perSlotCapacity = [];
+  for (let si = 0; si < slots.length; si++) {
+    const startNorm = normalizeTime(slotStartLabel(slots[si]));
+    const found = locateSlotCells(values, String(data.date), data.courtId, startNorm);
+    if (!found) throw new Error("Time slot not found: " + slots[si] + " on " + sheetName + " " + data.date);
+    const filled = found.cells.filter(c => c.value !== "");
+    if (filled.length) {
+      throw new Error("Slot already booked on " + sheetName + " " + data.date + " Court " + data.courtId + " " + slots[si] + " (by " + filled.map(c => c.value).join(", ") + ")");
+    }
+    if (found.cells.length < names.length) {
+      throw new Error("Court " + data.courtId + " has only " + found.cells.length + " cells for " + slots.length + " player(s) at " + slots[si]);
+    }
+    perSlotCapacity.push(found.cells.length);
+    // Assign one cell per player, filling the slot's cells in order.
+    for (let ni = 0; ni < names.length; ni++) {
+      const cell = found.cells[ni % found.cells.length];
+      plan.push({ row: cell.row, col: cell.col, name: names[ni], slot: slots[si] });
+    }
+  }
+
+  // Write everything, rolling back on failure so half a group is never saved.
+  const written = [];
+  try {
+    for (let i = 0; i < plan.length; i++) {
+      sh.getRange(plan[i].row + 1, plan[i].col + 1).setValue(plan[i].name);
+      written.push({ row: plan[i].row, col: plan[i].col });
+    }
+  } catch (err) {
+    for (let i = 0; i < written.length; i++) {
+      try { sh.getRange(written[i].row + 1, written[i].col + 1).clearContent(); } catch (e) {}
+    }
+    throw new Error("Booking failed and was rolled back: " + err.toString());
+  }
+  return true;
+}
+
+// Atomic group cancellation: every requested name is removed from every
+// requested 30-minute part. Fails (without changing anything) if none of the
+// names is found at all.
+function cancelGroup(ss, data) {
+  const sheetName = locationToSheet(data.location);
+  const sh = ss.getSheetByName(sheetName);
+  if (!sh) throw new Error("Sheet not found: " + sheetName);
+  const values = sh.getDataRange().getValues();
+  const names = cleanNames(data.names);
+  const slots = cleanSlots(data.slots);
+  if (!names.length) throw new Error("No players given");
+  if (!slots.length) throw new Error("No time slots given");
+
+  let foundAny = false;
+  const toClear = [];
+  for (let si = 0; si < slots.length; si++) {
+    const startNorm = normalizeTime(slotStartLabel(slots[si]));
+    const found = locateSlotCells(values, String(data.date), data.courtId, startNorm);
+    if (!found) continue; // slot missing on this date -> nothing to remove
+    for (let ci = 0; ci < found.cells.length; ci++) {
+      const cell = found.cells[ci];
+      if (cell.value !== "" && names.indexOf(cell.value) !== -1) {
+        toClear.push({ row: cell.row, col: cell.col });
+        foundAny = true;
+      }
+    }
+  }
+  if (!foundAny) {
+    throw new Error("No booking found to cancel on " + sheetName + " " + data.date + " Court " + data.courtId);
+  }
+  for (let i = 0; i < toClear.length; i++) {
+    sh.getRange(toClear[i].row + 1, toClear[i].col + 1).clearContent();
+  }
+  return true;
+}
+
+// Single-name toggle kept for older app builds (span-aware).
+function toggleGridReservation(ss, data) {
+  const sheetName = locationToSheet(data.location);
+  const sh = ss.getSheetByName(sheetName);
+  if (!sh) throw new Error("Sheet not found: " + sheetName);
+  const values = sh.getDataRange().getValues();
+  const startNorm = normalizeTime(slotStartLabel(String(data.slot)));
+  const name = String(data.name).trim();
+  const found = locateSlotCells(values, String(data.date), data.courtId, startNorm);
+  if (!found) throw new Error("Time slot not found: " + data.slot + " on " + sheetName + " " + data.date);
+
+  // If the name already exists somewhere in this court's cells, remove it.
+  let wrote = false;
+  for (let i = 0; i < found.cells.length; i++) {
+    if (found.cells[i].value === name) {
+      sh.getRange(found.cells[i].row + 1, found.cells[i].col + 1).clearContent();
+      return true;
+    }
+  }
+  // Otherwise write into the first empty cell of this court's span.
+  for (let i = 0; i < found.cells.length; i++) {
+    if (found.cells[i].value === "") {
+      sh.getRange(found.cells[i].row + 1, found.cells[i].col + 1).setValue(name);
+      wrote = true;
+      break;
+    }
+  }
+  if (!wrote) throw new Error("Slot full at " + sheetName + " " + data.date + " Court " + data.courtId + " " + data.slot);
+  return true;
 }
