@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import Head from 'next/head'
 import CourtGrid from '../components/CourtGrid'
 import CourtSchedule from '../components/CourtSchedule'
@@ -93,30 +93,34 @@ const THIRTY_MIN_SLOTS = (() => {
   return labels
 })()
 
-function findOpenCourts(reservations, selectedDay, locationFilter) {
-  const locations = locationFilter ? [locationFilter] : LOCATIONS
-  const results = []
+// Courts a player can act on for one slot: completely open ones, plus courts
+// already booked by that player (so they can cancel from the same list).
+// The booking screen treats any name as "taken", so slots booked only by
+// other players are excluded.
+function findCourtsForBooking(reservations, location, dateKey, slotLabel, name) {
+  return (COURTS_BY_LOCATION[location] || [])
+    .map((courtId) => {
+      const players = reservations[`${location}|${dateKey}|${courtId}`]?.[slotLabel]
+      const list = Array.isArray(players) ? players : []
+      const mine = list.includes(name)
+      const open = list.length === 0
+      return open || mine ? { location, courtId, mine } : null
+    })
+    .filter(Boolean)
+    .sort((a, b) => Number(b.mine) - Number(a.mine) || a.courtId - b.courtId)
+}
 
-  for (const location of locations) {
-    for (const courtId of COURTS_BY_LOCATION[location] || []) {
-      const reserved = reservations[`${location}|${selectedDay}|${courtId}`] || {}
-      const openSlots = THIRTY_MIN_SLOTS.filter((label) => {
-        const players = reserved[label]
-        return !Array.isArray(players) || players.length === 0
-      })
-      if (openSlots.length > 0) {
-        results.push({
-          location,
-          courtId,
-          openCount: openSlots.length,
-          nextSlot: openSlots[0],
-        })
-      }
-    }
-  }
-
-  results.sort((a, b) => b.openCount - a.openCount || a.location.localeCompare(b.location) || a.courtId - b.courtId)
-  return results
+// Same "max 2 sessions per player per day" rule the court schedule modal
+// enforces, counting a player's bookings at one venue on one date.
+function countPlayerSessions(reservations, location, dateKey, name) {
+  const prefix = `${location}|${dateKey}`
+  return Object.keys(reservations).reduce((acc, key) => {
+    if (!key.startsWith(prefix)) return acc
+    Object.values(reservations[key] || {}).forEach((players) => {
+      if (Array.isArray(players) && players.includes(name)) acc++
+    })
+    return acc
+  }, 0)
 }
 
 export default function Home() {
@@ -134,8 +138,12 @@ export default function Home() {
   const [showPlayerDropdown, setShowPlayerDropdown] = useState(false)
   const [pendingReservations, setPendingReservations] = useState({})
   const [showFindCourt, setShowFindCourt] = useState(false)
-  const [findResults, setFindResults] = useState([])
-  const [findScope, setFindScope] = useState('all')
+  const [findLocation, setFindLocation] = useState(LOCATIONS[0])
+  const [findDay, setFindDay] = useState("")
+  const [findTime, setFindTime] = useState("")
+  const [findNotice, setFindNotice] = useState(null)
+  const [sheetsConnected, setSheetsConnected] = useState(null) // null = still loading/unknown
+  const lastScheduleSync = useRef(0)
 
   useEffect(() => {
     setMounted(true)
@@ -178,23 +186,41 @@ export default function Home() {
     setCurrentPlayer(getPlayerFromUrl())
   }, [])
 
-  useEffect(() => {
-    async function loadSchedule() {
-      try {
-        const response = await fetch('/api/schedule')
-        if (!response.ok) throw new Error('Failed to load schedule')
-        const result = await response.json()
-        setReservations(result.reservations || {})
-        if (Array.isArray(result.roster) && result.roster.length > 0) setRoster(result.roster)
-      } catch (e) {
-        console.warn('Using locally available schedule data', e)
-      } finally {
-        setRosterLoaded(true)
-      }
+  // Loads the full schedule (reservations + roster). The response also reports
+  // whether the server is actually wired to Google Sheets; when it is not, a
+  // warning banner is shown instead of silently presenting empty data.
+  const refreshSchedule = useCallback(async () => {
+    try {
+      const response = await fetch('/api/schedule')
+      if (!response.ok) throw new Error('Failed to load schedule')
+      const result = await response.json()
+      lastScheduleSync.current = Date.now()
+      setReservations(result.reservations || {})
+      if (Array.isArray(result.roster) && result.roster.length > 0) setRoster(result.roster)
+      setSheetsConnected(result.connected === true)
+      return true
+    } catch (e) {
+      console.warn('Unable to load schedule from the server', e)
+      setSheetsConnected(false)
+      return false
+    } finally {
+      setRosterLoaded(true)
     }
-
-    loadSchedule()
   }, [])
+
+  useEffect(() => {
+    refreshSchedule()
+  }, [refreshSchedule])
+
+  // Pick up bookings made by other players (or direct sheet edits) when the
+  // tab is revisited, without hammering the Sheets backend.
+  useEffect(() => {
+    function handleWindowFocus() {
+      if (Date.now() - lastScheduleSync.current > 30_000) refreshSchedule()
+    }
+    window.addEventListener('focus', handleWindowFocus)
+    return () => window.removeEventListener('focus', handleWindowFocus)
+  }, [refreshSchedule])
 
   useEffect(() => {
     if (rosterLoaded && roster.length > 0 && !roster.includes(currentPlayer)) {
@@ -231,16 +257,27 @@ export default function Home() {
     }))
   }, [selectedLocation, selectedDay])
 
+  // Recomputed on every render of the modal, so results stay accurate even
+  // right after a booking is made from inside Find a Court.
+  const findCourts = useMemo(() => {
+    if (!showFindCourt || !findLocation || !findDay || !findTime) return []
+    return findCourtsForBooking(reservations, findLocation, findDay, findTime, currentPlayer)
+  }, [showFindCourt, findLocation, findDay, findTime, reservations, currentPlayer])
+
   function handleSelectCourt(id) {
     setSelectedCourt(id)
   }
 
   const selectedCourtIndex = courts.findIndex((court) => court.id === selectedCourt)
 
-  async function handleReserve(courtId, slot, name) {
-    const reservationKey = `${selectedLocation}|${selectedDay}|${courtId}`
+  // Toggles one player's booking for one slot. The UI updates immediately and
+  // the write goes to Google Sheets via /api/reservations; on failure the
+  // change is rolled back. Returns whether the server accepted the write so
+  // callers (e.g. Find a Court) only show a confirmation when it really saved.
+  async function handleReserve(location, date, courtId, slot, name) {
+    const reservationKey = `${location}|${date}|${courtId}`
     const requestKey = `${reservationKey}|${slot}|${name}`
-    if (pendingReservations[requestKey]) return
+    if (pendingReservations[requestKey]) return false
 
     const wasReserved = (reservations[reservationKey]?.[slot] || []).includes(name)
     setPendingReservations((pending) => ({ ...pending, [requestKey]: true }))
@@ -262,9 +299,13 @@ export default function Home() {
       const response = await fetch('/api/reservations', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ location: selectedLocation, date: selectedDay, courtId, slot, name }),
+        body: JSON.stringify({ location, date, courtId, slot, name }),
       })
       if (!response.ok) throw new Error('Unable to save reservation')
+      // Re-sync from the sheet shortly after the write so the local view
+      // always settles on what the backend actually stored.
+      setTimeout(() => refreshSchedule(), 1000)
+      return true
     } catch (e) {
       console.error('Failed saving reservation', e)
       setReservations((current) => {
@@ -281,6 +322,7 @@ export default function Home() {
         return next
       })
       alert('Unable to update reservation. Please try again.')
+      return false
     } finally {
       setPendingReservations((pending) => {
         const next = { ...pending }
@@ -288,6 +330,49 @@ export default function Home() {
         return next
       })
     }
+  }
+
+  function openFindCourt() {
+    setFindLocation(selectedLocation)
+    setFindDay(selectedDay)
+    setFindTime('')
+    setFindNotice(null)
+    setShowFindCourt(true)
+  }
+
+  // Find a Court result: book the chosen slot on that court for the signed-in
+  // player, or let them cancel their own booking from the same list.
+  async function handleFindCourtPick(courtId) {
+    const reservationKey = `${findLocation}|${findDay}|${courtId}`
+    const players = reservations[reservationKey]?.[findTime] || []
+    if (players.includes(currentPlayer)) {
+      if (confirm(`Cancel your reservation for Court ${courtId} at ${findTime}?`)) {
+        await handleReserve(findLocation, findDay, courtId, findTime, currentPlayer)
+        setFindNotice(null)
+      }
+      return
+    }
+    if (players.length > 0) {
+      alert(`Court ${courtId} was just booked by someone else. Pick another court.`)
+      return
+    }
+    if (countPlayerSessions(reservations, findLocation, findDay, currentPlayer) >= 2) {
+      alert('You already have 2 sessions today.')
+      return
+    }
+    const saved = await handleReserve(findLocation, findDay, courtId, findTime, currentPlayer)
+    if (saved) {
+      setFindNotice(`Booked Court ${courtId} at ${LOCATION_SHORT[findLocation] || findLocation} for ${findTime}.`)
+    }
+  }
+
+  // Jumps from Find a Court to the full schedule for one court so the booking
+  // can be viewed or adjusted.
+  function openCourtSchedule(location, dateKey, courtId) {
+    setSelectedLocation(location)
+    setSelectedDay(dateKey)
+    setSelectedCourt(courtId)
+    setShowFindCourt(false)
   }
 
   if (!mounted) {
@@ -323,11 +408,7 @@ export default function Home() {
             <button className="rounded-full px-3 py-1.5 bg-emerald-500 text-white shadow-sm shadow-emerald-500/20 transition">Practice Courts</button>
             <button
               type="button"
-              onClick={() => {
-                setFindScope('all')
-                setFindResults(findOpenCourts(reservations, selectedDay, null))
-                setShowFindCourt(true)
-              }}
+              onClick={openFindCourt}
               className="rounded-full px-3 py-1.5 bg-white/15 text-white border border-white/20 hover:bg-white/25 transition"
             >
               Find a Court
@@ -390,6 +471,31 @@ export default function Home() {
             </div>
           </div>
         </nav>
+
+        {/* Google Sheets connection warning — only when the server reports it
+            is NOT backed by a write-capable Sheets connection. Falling back to
+            local storage is exactly what made existing reservations appear to
+            disappear, so surface it loudly instead of failing silently. */}
+        {sheetsConnected === false && (
+          <div className="mb-6 flex items-start gap-3 rounded-2xl border border-amber-300 bg-amber-50 px-4 py-3 text-amber-900 shadow-sm" role="alert">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="shrink-0 mt-0.5 text-amber-500">
+              <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
+              <line x1="12" y1="9" x2="12" y2="13" />
+              <line x1="12" y1="17" x2="12.01" y2="17" />
+            </svg>
+            <div className="text-sm leading-relaxed">
+              <span className="font-semibold">Not connected to Google Sheets.</span> The app is showing fallback data, so existing reservations may be missing and new bookings will not be saved to the sheet. Check the <code className="rounded bg-amber-100 px-1 py-0.5 text-xs">SHEETS_WEBAPP_URL</code> setting and confirm the latest <code className="rounded bg-amber-100 px-1 py-0.5 text-xs">CourtzAppsScript.gs</code> is deployed as a web app with access set to &quot;Anyone&quot;.
+            </div>
+            <button
+              type="button"
+              onClick={() => setSheetsConnected(null)}
+              className="ml-auto shrink-0 rounded-lg p-1 text-amber-500 hover:bg-amber-100 hover:text-amber-700 transition"
+              aria-label="Dismiss"
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg>
+            </button>
+          </div>
+        )}
 
         {/* Day Selector — Pill Buttons */}
         <div className="mb-6">
@@ -529,70 +635,149 @@ export default function Home() {
               <div className="flex justify-between items-start">
                 <div>
                   <h2 className="text-xl font-bold text-white">Find a Court</h2>
-                  <p className="text-sm text-blue-200 mt-1">Open 30-minute slots for {selectedDay}</p>
+                  <p className="text-sm text-blue-200 mt-1">Pick a location, a day, and a time to see courts you can book.</p>
                 </div>
                 <button onClick={() => setShowFindCourt(false)} className="rounded-lg bg-white/10 hover:bg-white/20 p-2 text-white" aria-label="Close">
                   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg>
                 </button>
               </div>
-              <div className="flex flex-wrap gap-2 mt-4">
-                <button
-                  onClick={() => {
-                    setFindScope('all')
-                    setFindResults(findOpenCourts(reservations, selectedDay, null))
-                  }}
-                  className={`rounded-full text-sm font-medium px-4 py-1.5 ${
-                    findScope === 'all'
-                      ? 'bg-emerald-500 text-white'
-                      : 'bg-white/15 text-white border border-white/20'
-                  }`}
-                >
-                  Search all locations
-                </button>
-                <button
-                  onClick={() => {
-                    setFindScope(selectedLocation)
-                    setFindResults(findOpenCourts(reservations, selectedDay, selectedLocation))
-                  }}
-                  className={`rounded-full text-sm font-medium px-4 py-1.5 ${
-                    findScope === selectedLocation
-                      ? 'bg-emerald-500 text-white'
-                      : 'bg-white/15 text-white border border-white/20'
-                  }`}
-                >
-                  Search {LOCATION_SHORT[selectedLocation] || selectedLocation}
-                </button>
+              <div className="mt-4 inline-flex items-center gap-1.5 rounded-full bg-white/10 px-3 py-1.5 text-xs font-medium text-white">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
+                  <circle cx="12" cy="7" r="4" />
+                </svg>
+                Booking as {currentPlayer}
               </div>
             </div>
-            <div className="p-4 max-h-[60vh] overflow-auto">
-              {findResults.length === 0 ? (
-                <p className="text-sm text-slate-500 text-center py-8">No open 30-minute slots found for this day.</p>
-              ) : (
-                <div className="space-y-2">
-                  {findResults.map((r) => (
-                    <button
-                      key={`${r.location}-${r.courtId}`}
-                      onClick={() => {
-                        setSelectedLocation(r.location)
-                        setSelectedCourt(r.courtId)
-                        setShowFindCourt(false)
-                      }}
-                      className="w-full text-left rounded-xl border border-slate-200 hover:border-emerald-300 hover:bg-emerald-50/50 px-4 py-3 transition"
-                    >
-                      <div className="flex justify-between items-center gap-3">
-                        <div>
-                          <div className="font-semibold text-slate-800">Court {r.courtId}</div>
-                          <div className="text-xs text-slate-500">{r.location}</div>
-                        </div>
-                        <div className="text-right">
-                          <div className="text-sm font-medium text-emerald-700">{r.openCount} open</div>
-                          <div className="text-xs text-slate-400">Next: {r.nextSlot}</div>
-                        </div>
-                      </div>
-                    </button>
-                  ))}
+
+            <div className="p-4 max-h-[60vh] overflow-auto space-y-4">
+              {/* Step 1 — Location */}
+              <div>
+                <div className="text-xs font-semibold uppercase tracking-wider text-slate-500 mb-2">1. Location</div>
+                <div className="flex flex-wrap gap-2">
+                  {LOCATIONS.map((loc) => {
+                    const isActive = findLocation === loc
+                    return (
+                      <button
+                        key={loc}
+                        type="button"
+                        onClick={() => { setFindLocation(loc); setFindNotice(null) }}
+                        className={`rounded-lg border-2 px-3 py-1.5 text-sm font-medium transition ${
+                          isActive
+                            ? 'border-[#1f5f99] bg-[#1f5f99] text-white'
+                            : 'border-slate-200 bg-white text-slate-700 hover:border-slate-300'
+                        }`}
+                      >
+                        {loc}
+                      </button>
+                    )
+                  })}
                 </div>
-              )}
+              </div>
+
+              {/* Step 2 — Day */}
+              <div>
+                <div className="text-xs font-semibold uppercase tracking-wider text-slate-500 mb-2">2. Day</div>
+                <div className="flex gap-2 overflow-x-auto pb-1">
+                  {days.map((d) => {
+                    const isActive = findDay === d.key
+                    return (
+                      <button
+                        key={d.key}
+                        type="button"
+                        onClick={() => { setFindDay(d.key); setFindNotice(null) }}
+                        className={`flex flex-col items-center min-w-[3.5rem] px-2.5 py-1.5 rounded-lg border-2 transition shrink-0 ${
+                          isActive
+                            ? 'border-[#1f5f99] bg-[#1f5f99] text-white'
+                            : 'border-slate-200 bg-white text-slate-700 hover:border-slate-300'
+                        }`}
+                      >
+                        <span className={`text-[11px] font-medium ${isActive ? 'text-blue-200' : 'text-slate-400'}`}>{d.dayName}</span>
+                        <span className="text-base font-bold leading-tight">{d.dayNum}</span>
+                      </button>
+                    )
+                  })}
+                </div>
+              </div>
+
+              {/* Step 3 — Time */}
+              <div>
+                <div className="text-xs font-semibold uppercase tracking-wider text-slate-500 mb-2">3. Time</div>
+                <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                  {THIRTY_MIN_SLOTS.map((slot) => {
+                    const isActive = findTime === slot
+                    return (
+                      <button
+                        key={slot}
+                        type="button"
+                        onClick={() => { setFindTime(slot); setFindNotice(null) }}
+                        className={`rounded-lg border-2 px-2 py-1.5 text-xs font-medium transition ${
+                          isActive
+                            ? 'border-[#1f5f99] bg-[#1f5f99] text-white'
+                            : 'border-slate-200 bg-white text-slate-600 hover:border-slate-300'
+                        }`}
+                      >
+                        {slot}
+                      </button>
+                    )
+                  })}
+                </div>
+              </div>
+
+              {/* Step 4 — Available courts */}
+              <div>
+                <div className="text-xs font-semibold uppercase tracking-wider text-slate-500 mb-2">4. Available courts</div>
+                {findNotice && (
+                  <div className="mb-3 flex items-center gap-2 rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-800">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className="shrink-0">
+                      <polyline points="20 6 9 17 4 12" />
+                    </svg>
+                    {findNotice}
+                  </div>
+                )}
+                {!findTime ? (
+                  <p className="text-sm text-slate-500 text-center py-6">Choose a time above to see which courts are open.</p>
+                ) : findCourts.length === 0 ? (
+                  <p className="text-sm text-slate-500 text-center py-6">
+                    No courts are open at {LOCATION_SHORT[findLocation] || findLocation} for {findTime}. Try another time.
+                  </p>
+                ) : (
+                  <div className="space-y-2">
+                    {findCourts.map((r) => {
+                      const isMine = r.mine
+                      const isSaving = Boolean(pendingReservations[`${r.location}|${findDay}|${r.courtId}|${findTime}|${currentPlayer}`])
+                      return (
+                        <div
+                          key={`${r.location}-${r.courtId}`}
+                          className={`flex items-center justify-between gap-3 rounded-xl border-2 px-4 py-3 transition ${
+                            isMine ? 'border-emerald-300 bg-emerald-50' : 'border-slate-200'
+                          }`}
+                        >
+                          <button
+                            type="button"
+                            onClick={() => handleFindCourtPick(r.courtId)}
+                            disabled={isSaving}
+                            className="flex-1 text-left"
+                          >
+                            <div className="font-semibold text-slate-800">Court {r.courtId}</div>
+                            <div className="text-xs text-slate-500">{r.location}</div>
+                            <div className={`text-xs font-medium mt-1 ${isMine ? 'text-emerald-700' : 'text-slate-400'}`}>
+                              {isSaving ? 'Saving…' : isMine ? 'Booked by you — tap to cancel' : 'Open — tap to book'}
+                            </div>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => openCourtSchedule(r.location, findDay, r.courtId)}
+                            className="shrink-0 rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-medium text-[#1f5f99] hover:border-[#1f5f99]/40 hover:bg-blue-50 transition"
+                          >
+                            View
+                          </button>
+                        </div>
+                      )
+                    })}
+                  </div>
+                )}
+              </div>
             </div>
           </div>
         </div>
@@ -607,7 +792,7 @@ export default function Home() {
           roster={roster}
           currentPlayer={currentPlayer}
           pendingReservations={pendingReservations}
-          onReserve={(courtId, slot, name) => handleReserve(courtId, slot, name)}
+          onReserve={(courtId, slot, name) => handleReserve(selectedLocation, selectedDay, courtId, slot, name)}
           canGoPrevious={selectedCourtIndex > 0}
           canGoNext={selectedCourtIndex >= 0 && selectedCourtIndex < courts.length - 1}
           onPreviousCourt={() => setSelectedCourt(courts[selectedCourtIndex - 1].id)}

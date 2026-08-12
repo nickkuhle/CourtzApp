@@ -130,6 +130,25 @@ You are the only admin, so `POST /api/reservations` (toggle) now writes to Sheet
 
 When ready to go live, just change `GOOGLE_SHEETS_ID` in `.env.local` to your real Sheet ID (not the copy) and re-deploy the Web App from the real Sheet.
 
+## Reservations disappearing? (connection health)
+
+The app now tells you when it is NOT connected to Google Sheets instead of
+silently showing empty/fallback data: an amber banner appears on the home page
+whenever `/api/schedule` could not reach a write-capable Sheets backend.
+
+If you see that banner, check these in order:
+
+1. **Verify the Apps Script deployment** — open this in a browser (replace with your URL):
+   ```
+   https://script.google.com/macros/s/YOUR_DEPLOYMENT_ID/exec?action=ping
+   ```
+   Expect: `{"success":true,"version":"1.1","tabs":[...]}`
+   - A Google **login page** or error page → the web app is not shared with "Anyone". Redeploy with **Who has access: Anyone**.
+   - No `version` field, or an old version → the Sheet is running an old copy of the script. Paste the latest `CourtzAppsScript.gs` and redeploy.
+2. **Redeploy correctly after editing the script** — in Apps Script: **Deploy → Manage deployments → pencil icon → Version: New version → Deploy**. This updates the existing `/exec` URL. ("New deployment" creates a *different* URL — then you must update `SHEETS_WEBAPP_URL` to match.)
+3. **Check `SHEETS_WEBAPP_URL` in your host's env settings** (e.g. Vercel → Project → Settings → Environment Variables) — it must be the full `/exec` URL. Redeploy the app after changing env vars; serverless env changes do not apply to already-running builds.
+4. **Local JSON fallback** — without a working WebApp/Service Account, the app writes to `data/reservations.json`, which is **ephemeral on Vercel** (lost on every deploy/cold start). That fallback exists only for local development; treat the banner as "fix the connection now".
+
 ## Questions?
 
 - If your roster is on a tab named "Players" not "Roster", just tell me or change `TAB_NAMES.ROSTER` in CourtzAppsScript.gs
