@@ -1,4 +1,4 @@
-import { getSchedule } from '../../lib/sheets'
+import { getSchedule } from '../../lib/sheets.js'
 
 // One initial request provides both pieces of data the booking screen needs.
 // This avoids making a second round-trip to Google Sheets just for the roster.

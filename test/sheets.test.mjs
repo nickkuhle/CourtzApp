@@ -123,6 +123,8 @@ test('books a whole group atomically via bookGroup', async () => {
     courtId: '6',
     slots: ['8:00 AM–8:30 AM', '8:30 AM–9:00 AM'],
     names: ['Abbey, Stephanie', 'Chen, Alice'],
+    staffApproved: false,
+    practiceLocations: null,
   })
 })
 
@@ -150,6 +152,8 @@ test('cancels a whole group atomically via cancelGroup', async () => {
     courtId: '6',
     slots: ['8:00 AM–8:30 AM'],
     names: ['Abbey, Stephanie', 'Chen, Alice'],
+    staffApproved: false,
+    practiceLocations: null,
   })
 })
 
@@ -179,6 +183,8 @@ test('writes a single reservation to Apps Script (legacy toggle)', async () => {
     courtId: '4',
     slot: '8:00 AM–8:30 AM',
     name: 'Abbey, Stephanie',
+    staffApproved: false,
+    practiceLocations: null,
   })
 })
 

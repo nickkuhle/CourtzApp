@@ -1,4 +1,4 @@
-import { getRoster } from '../../lib/sheets'
+import { getRoster } from '../../lib/sheets.js'
 
 export default async function handler(req, res) {
   try {

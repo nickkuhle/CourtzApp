@@ -1,4 +1,5 @@
 import React, { useEffect } from 'react'
+import { existingPlayerSessions, MAX_SESSIONS_PER_DAY } from '../lib/booking-rules'
 
 function formatTimeLabel(totalMinutes) {
   const hours = Math.floor(totalMinutes / 60)
@@ -52,7 +53,7 @@ function SpinnerIcon() {
   )
 }
 
-function Slot({ time, reservedBy = [], onClick, disabled, isOwnedByCurrentPlayer, isSaving }) {
+function Slot({ time, reservedBy = [], onClick, disabled, ended, isOwnedByCurrentPlayer, isSaving }) {
   const count = Array.isArray(reservedBy) ? reservedBy.length : 0
   const busy = count > 0
 
@@ -62,6 +63,11 @@ function Slot({ time, reservedBy = [], onClick, disabled, isOwnedByCurrentPlayer
     badgeClasses = 'bg-amber-100 text-amber-700'
     badgeText = 'Saving…'
     badgeIcon = <SpinnerIcon />
+  } else if (ended) {
+    containerClasses = 'bg-slate-50 border-slate-200 opacity-60 cursor-not-allowed'
+    badgeClasses = 'bg-slate-200/80 text-slate-500'
+    badgeText = 'Ended'
+    badgeIcon = <LockIcon />
   } else if (isOwnedByCurrentPlayer) {
     containerClasses = 'bg-emerald-50 border-emerald-200 hover:border-emerald-400 hover:bg-emerald-100 cursor-pointer'
     badgeClasses = 'bg-emerald-200/70 text-emerald-800'
@@ -110,8 +116,10 @@ function Slot({ time, reservedBy = [], onClick, disabled, isOwnedByCurrentPlayer
 // Slot clicks are handed to the parent, which opens the shared group-booking
 // dialog: open slots start a booking with the signed-in player; slots the
 // signed-in player already holds open the cancellation dialog for the whole
-// group booked in that slot.
-export default function CourtSchedule({ court, date, location, reservations, currentPlayer = 'Alice Johnson', pendingReservations = {}, onOpenBooking, onPreviousCourt, onNextCourt, canGoPrevious = false, canGoNext = false, onClose }) {
+// group booked in that slot. Days outside today/tomorrow and 30-minute slots
+// that have already ended are view-only: they can be inspected but never
+// booked or canceled.
+export default function CourtSchedule({ court, date, location, reservations, currentPlayer = 'Alice Johnson', pendingReservations = {}, practiceLocations = null, viewOnly = false, completedSlots = null, barnesOnly30 = false, onOpenBooking, onPreviousCourt, onNextCourt, canGoPrevious = false, canGoNext = false, onClose }) {
   if (!court) return null
 
   useEffect(() => {
@@ -127,6 +135,15 @@ export default function CourtSchedule({ court, date, location, reservations, cur
   // Count slots for summary
   const key = `${location}|${date}|${court}`
   const reserved = reservations[key] || {}
+
+  // Practice sessions already used by this player today (max 2). Barnes
+  // 30-minute slots count one each; elsewhere two consecutive 30-minute slots
+  // on the same court count as a single session.
+  const sessionsUsed = existingPlayerSessions(reservations, {
+    dateKey: date,
+    name: currentPlayer,
+    practiceLocations,
+  }).length
 
   const totalSlots = (() => {
     const start = 8 * 60
@@ -203,6 +220,18 @@ export default function CourtSchedule({ court, date, location, reservations, cur
                 {myCount} yours
               </div>
             )}
+            <div
+              className="flex items-center gap-1.5 rounded-full bg-white/10 px-3 py-1.5 text-xs font-medium text-white"
+              title="Practice sessions used by this player today (max 2)"
+            >
+              <span className="w-2 h-2 rounded-full bg-amber-300" />
+              {Math.min(sessionsUsed, MAX_SESSIONS_PER_DAY)}/{MAX_SESSIONS_PER_DAY} sessions today
+            </div>
+            {viewOnly && (
+              <div className="flex items-center gap-1.5 rounded-full bg-amber-400/20 px-3 py-1.5 text-xs font-medium text-amber-200">
+                View only — bookings are allowed for today and tomorrow only
+              </div>
+            )}
           </div>
         </div>
 
@@ -210,10 +239,12 @@ export default function CourtSchedule({ court, date, location, reservations, cur
         <div className="px-6 py-4 border-b border-slate-100 shrink-0">
           <div className="flex flex-wrap items-center gap-3">
             <div className="flex items-center gap-2">
-              <span className="text-sm font-medium text-slate-600">Booking as</span>
+              <span className="text-sm font-medium text-slate-600">Booking Courts As</span>
               <span className="rounded-full bg-[#1f5f99]/10 px-3 py-1 text-sm font-semibold text-[#1f5f99]">{currentPlayer}</span>
             </div>
-            <span className="ml-auto rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-500">30-minute times</span>
+            <span className="ml-auto rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-500">
+              {barnesOnly30 ? '30-minute times — Barnes allows one 30-minute session per reservation' : '30-minute times'}
+            </span>
           </div>
         </div>
 
@@ -222,6 +253,7 @@ export default function CourtSchedule({ court, date, location, reservations, cur
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             {slots.map((slot) => {
               const players = reserved[slot.label] || []
+              const ended = completedSlots ? completedSlots.has(slot.label) : false
               const isOwnedByCurrentPlayer = players.includes(currentPlayer)
               const isReservedBySomeoneElse = players.length > 0 && !isOwnedByCurrentPlayer
               const requestKey = `${key}|${slot.label}|${currentPlayer}`
@@ -232,9 +264,18 @@ export default function CourtSchedule({ court, date, location, reservations, cur
                   time={slot.label}
                   reservedBy={players}
                   disabled={isReservedBySomeoneElse || isSaving}
+                  ended={ended}
                   isOwnedByCurrentPlayer={isOwnedByCurrentPlayer}
                   isSaving={isSaving}
                   onClick={() => {
+                    if (ended) {
+                      alert('That time has already ended and can no longer be booked or canceled.')
+                      return
+                    }
+                    if (viewOnly) {
+                      alert('This day is view only — bookings and cancellations are only available for today and tomorrow.')
+                      return
+                    }
                     if (isReservedBySomeoneElse) {
                       alert(`That slot is reserved by ${players.join(', ')}. You can only manage your own bookings.`)
                       return

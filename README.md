@@ -61,5 +61,11 @@ node scripts/mock-apps-script.mjs            # terminal 1
 SHEETS_WEBAPP_URL=http://127.0.0.1:3100/exec npm run dev   # terminal 2
 ```
 
+### Booking rules (v2.1)
+
+- Bookings and cancellations are only allowed for **today and tomorrow** (America/Los_Angeles). Other days are marked **View only**, and ended 30-minute slots cannot be changed. Enforced in the UI, the Next.js API, and `CourtzAppsScript.gs`.
+- Max **2 practice sessions per player per day**. Barnes slots each count as one session; a continuous 1-hour booking elsewhere counts as one session. Back-to-back/close sessions require an explicit tournament-staff approval ("Confirm — staff approved"); the 2-session maximum can never be bypassed.
+- Barnes, Peninsula and PLNU are shown by default; USD, Balboa and Pacific Beach stay hidden (match-play sites) and can be added with **+ Add site**.
+
 See [INTEGRATION_GUIDE.md](./INTEGRATION_GUIDE.md) for the step-by-step setup,
-testing checklist, and the instructions for redeploying the Apps Script (v2.0).
+testing checklist, and the instructions for redeploying the Apps Script (v2.1).
