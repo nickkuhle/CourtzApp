@@ -1,5 +1,8 @@
 // Courtz App - Google Sheets Backend (GRID VERSION for actual sheet)
 // SHEET_ID: 1U3TcsbIhQ9lxeo0_LtHYTldIqbkWg2Je
+// Bump SCRIPT_VERSION on every edit so the app (and you) can verify which
+// deployment is actually live via WEBAPP_URL?action=ping.
+const SCRIPT_VERSION = "1.1";
 const SHEET_ID = "1U3TcsbIhQ9lxeo0_LtHYTldIqbkWg2Je";
 const LOCATION_MAP = {
   "Barnes TC": "Barnes Tennis Center",
@@ -18,22 +21,28 @@ function doGet(e) {
   const action = e.parameter.action || "getAll";
   const ss = SpreadsheetApp.openById(SHEET_ID);
   try {
+    if (action === "ping") {
+      // Health check: open your WEBAPP_URL?action=ping in a browser. You should
+      // see JSON with this version; a Google login or error page means the
+      // deployment is not shared with "Anyone".
+      return jsonResponse({ success: true, version: SCRIPT_VERSION, tabs: ss.getSheets().map(s => s.getName()) });
+    }
     if (action === "listTabs") {
       const tabs = ss.getSheets().map(s => s.getName());
-      return jsonResponse({ success: true, tabs: tabs });
+      return jsonResponse({ success: true, version: SCRIPT_VERSION, tabs: tabs });
     }
     if (action === "getRoster") {
       const roster = getRosterData(ss);
-      return jsonResponse({ success: true, data: roster });
+      return jsonResponse({ success: true, version: SCRIPT_VERSION, data: roster });
     }
     if (action === "getAll" || action === "getReservations") {
       const roster = getRosterData(ss).map(r => r.Name || r.name).filter(Boolean);
       const reservations = getAllReservations(ss);
-      return jsonResponse({ success: true, roster: roster, reservations: reservations });
+      return jsonResponse({ success: true, version: SCRIPT_VERSION, roster: roster, reservations: reservations });
     }
-    return jsonResponse({ success: false, error: "Unknown action: " + action });
+    return jsonResponse({ success: false, version: SCRIPT_VERSION, error: "Unknown action: " + action });
   } catch (err) {
-    return jsonResponse({ success: false, error: err.toString(), stack: err.stack });
+    return jsonResponse({ success: false, version: SCRIPT_VERSION, error: err.toString(), stack: err.stack });
   }
 }
 
@@ -52,11 +61,11 @@ function doPost(e) {
       }
       // Do not re-parse every tab after a one-cell update. The app updates this
       // slot optimistically; its next read supplies the complete fresh schedule.
-      return jsonResponse({ success: true });
+      return jsonResponse({ success: true, version: SCRIPT_VERSION });
     }
-    return jsonResponse({ success: false, error: "Unknown POST action" });
+    return jsonResponse({ success: false, version: SCRIPT_VERSION, error: "Unknown POST action" });
   } catch (err) {
-    return jsonResponse({ success: false, error: err.toString(), stack: err.stack });
+    return jsonResponse({ success: false, version: SCRIPT_VERSION, error: err.toString(), stack: err.stack });
   }
 }
 
