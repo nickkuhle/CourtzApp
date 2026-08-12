@@ -2,9 +2,10 @@
 // SHEET_ID: 1U3TcsbIhQ9lxeo0_LtHYTldIqbkWg2Je  (TEST COPY - do not point at the real sheet)
 // Bump SCRIPT_VERSION on every edit so the app (and you) can verify which
 // deployment is actually live via WEBAPP_URL?action=ping.
-const SCRIPT_VERSION = "2.0";
+const SCRIPT_VERSION = "2.1";
 const SHEET_ID = "1U3TcsbIhQ9lxeo0_LtHYTldIqbkWg2Je";
 const DEFAULT_TOURNAMENT_YEAR = "2026";
+const TIME_ZONE = "America/Los_Angeles"; // San Diego: booking window always uses this zone
 const LOCATION_MAP = {
   "Barnes TC": "Barnes Tennis Center",
   "Peninsula Tennis Club": "Peninsula Tennis Club",
@@ -13,6 +14,10 @@ const LOCATION_MAP = {
   "Balboa Tennis": "Balboa Tennis Center",
   "USD": "USD"
 };
+// Sites shown by default in the app. Other grid tabs (match-play sites, new
+// tabs the desk adds to the Sheet) are discovered automatically and offered
+// through the app's "+" button.
+const PRACTICE_DEFAULT_LOCATIONS = ["Barnes Tennis Center", "Peninsula Tennis Club", "Point Loma Nazarene College"];
 const COURT_TABS = Object.keys(LOCATION_MAP);
 const MONTHS = { jan:"01", feb:"02", mar:"03", apr:"04", may:"05", jun:"06", jul:"07", aug:"08", sep:"09", oct:"10", nov:"11", dec:"12" };
 
@@ -70,19 +75,25 @@ function doPost(e) {
   try {
     const data = JSON.parse(e.postData.contents);
     // Serialise writes so two admins cannot claim the same open cell at once.
+    // All booking-window and session-limit rules are rechecked INSIDE the lock
+    // against fresh sheet data, so stale browser data cannot bypass them.
     const lock = LockService.getDocumentLock();
     lock.waitLock(15000);
     try {
       if (data.action === "bookGroup") {
-        bookGroup(ss, data); // data: {location, date, courtId, slots: [], names: []}
+        validateBookingWindowInGAS(data);
+        validateSessionRulesInGAS(ss, data);
+        bookGroup(ss, data); // data: {location, date, courtId, slots: [], names: [], staffApproved, activeLocations}
         return jsonResponse({ success: true, version: SCRIPT_VERSION, action: "bookGroup" });
       }
       if (data.action === "cancelGroup") {
+        validateBookingWindowInGAS(data);
         cancelGroup(ss, data); // data: {location, date, courtId, slots: [], names: []}
         return jsonResponse({ success: true, version: SCRIPT_VERSION, action: "cancelGroup" });
       }
       if (data.action === "toggleReservation") {
         // Single-player toggle kept for older app builds.
+        validateBookingWindowInGAS({ date: data.date, slots: [data.slot] });
         toggleGridReservation(ss, data); // data: {location, date, courtId, slot, name}
         return jsonResponse({ success: true, version: SCRIPT_VERSION, action: "toggleReservation" });
       }
@@ -107,16 +118,28 @@ function getRosterData(ss) {
 // --- SCHEDULE ---
 // Reads every court-location tab and returns reservations plus the full list of
 // dates and courts found in the sheet (including dates/courts with no bookings).
+// Tabs are discovered dynamically: any tab (other than "Players") that contains
+// the date/court grid layout is treated as a court-location tab, so newly added
+// Sheet tabs show up in the app's "+" menu automatically.
 function readFullSchedule(ss) {
   const all = {};
   const datesSet = {};
   const courtsByDate = {};
-  COURT_TABS.forEach(name => {
-    const sh = ss.getSheetByName(name);
-    if (!sh) return;
+  const locations = [];
+  const knownOrder = Object.keys(LOCATION_MAP);
+  const extraTabs = [];
+
+  ss.getSheets().forEach(sh => {
+    const name = sh.getName();
+    if (/^players$/i.test(name.trim())) return; // roster tab, not a court grid
     const values = sh.getDataRange().getValues();
     const parsed = parseGridValues(values, name);
+    // Only tabs that actually contain grid sections count as court tabs.
+    if (!parsed.dates.length && !Object.keys(parsed.reservations).length) return;
     const location = LOCATION_MAP[name] || name;
+
+    if (knownOrder.indexOf(name) === -1) extraTabs.push(name);
+    if (locations.indexOf(location) === -1) locations.push(location);
 
     // Merge reservations
     for (const k in parsed.reservations) {
@@ -138,6 +161,17 @@ function readFullSchedule(ss) {
     }
   });
 
+  // Keep the familiar order: known tabs first (in LOCATION_MAP order), then any
+  // newly discovered tabs sorted alphabetically.
+  const ordered = [];
+  knownOrder.forEach(tab => {
+    const location = LOCATION_MAP[tab];
+    if (locations.indexOf(location) !== -1 && ordered.indexOf(location) === -1) ordered.push(location);
+  });
+  extraTabs.sort().forEach(tab => {
+    if (ordered.indexOf(tab) === -1) ordered.push(tab);
+  });
+
   const roster = getRosterData(ss).map(r => r.Name || r.name).filter(Boolean);
   const days = Object.keys(datesSet).sort();
   return {
@@ -145,16 +179,17 @@ function readFullSchedule(ss) {
     reservations: all,
     days: days,
     courtsByDate: courtsByDate,
-    locations: COURT_TABS.map(name => LOCATION_MAP[name] || name)
+    locations: ordered
   };
 }
 
-// Backwards-compatible reservations-only read.
+// Backwards-compatible reservations-only read. Discovers grid tabs the same
+// dynamic way readFullSchedule does.
 function getAllReservations(ss) {
   const all = {};
-  COURT_TABS.forEach(name => {
-    const sh = ss.getSheetByName(name);
-    if (!sh) return;
+  ss.getSheets().forEach(sh => {
+    const name = sh.getName();
+    if (/^players$/i.test(name.trim())) return;
     const values = sh.getDataRange().getValues();
     const parsed = parseGridValues(values, name);
     for (const k in parsed.reservations) {
@@ -452,6 +487,186 @@ function addMinutes(timeStr, mins) {
 
 function slotStartLabel(slot) {
   return String(slot).split(/[\u2013-]/)[0].trim();
+}
+
+function slotEndLabel(slot) {
+  const parts = String(slot).split(/[\u2013-]/);
+  return parts.length > 1 ? parts[1].trim() : "";
+}
+
+// --- BOOKING WINDOW (America/Los_Angeles) ----------------------------------
+// Reservations may only be booked or changed for TODAY and TOMORROW in
+// America/Los_Angeles time regardless of the script/sheet/device timezone.
+// Ended 30-minute slots cannot be booked or canceled; the CURRENT 30-minute
+// slot stays available until its end time (at 1:15 PM, 1:00-1:30 PM is still
+// bookable while 12:30-1:00 PM is not). Mirrors lib/booking-window.js.
+
+function laDateKeyOffsetDays(offsetDays) {
+  // Compute "today in LA" first, then step over calendar dates at UTC noon
+  // (noon UTC always falls inside the same LA calendar date, so this is safe
+  // across DST transitions where a day is 23 or 25 hours long).
+  const today = Utilities.formatDate(new Date(), TIME_ZONE, "yyyy-MM-dd");
+  if (offsetDays === 0) return today;
+  const parts = today.split("-").map(Number);
+  const target = new Date(Date.UTC(parts[0], parts[1] - 1, parts[2] + offsetDays, 12));
+  return Utilities.formatDate(target, TIME_ZONE, "yyyy-MM-dd");
+}
+
+function laMinutesNow() {
+  const t = Utilities.formatDate(new Date(), TIME_ZONE, "HH:mm");
+  const parts = t.split(":");
+  return parseInt(parts[0], 10) * 60 + parseInt(parts[1], 10);
+}
+
+function slotRangeParts(slot) {
+  const start = timeToMinutes(slotStartLabel(slot));
+  const end = timeToMinutes(slotEndLabel(slot));
+  if (isNaN(start) || isNaN(end)) return null;
+  return { start: start, end: end };
+}
+
+function validateBookingWindowInGAS(data) {
+  const dateKey = String(data.date);
+  const today = laDateKeyOffsetDays(0);
+  const tomorrow = laDateKeyOffsetDays(1);
+  if (dateKey !== today && dateKey !== tomorrow) {
+    throw new Error("This day is view only. Reservations can only be booked or changed for " + today + " or " + tomorrow + " (America/Los_Angeles).");
+  }
+  const slots = cleanSlots(data.slots || []);
+  if (!slots.length && data.slot) slots.push(data.slot);
+  const nowMinutes = laMinutesNow();
+  const completed = [];
+  for (let i = 0; i < slots.length; i++) {
+    const range = slotRangeParts(slots[i]);
+    if (!range) throw new Error("Invalid time slot: " + slots[i]);
+    // Only today's slots can have ended; tomorrow is always open.
+    if (dateKey === today && nowMinutes >= range.end) completed.push(slots[i]);
+  }
+  if (completed.length) {
+    throw new Error("These times have already ended: " + completed.join(", ") + ". Ended time slots cannot be booked or canceled; the current 30-minute slot stays available until it ends.");
+  }
+  return { today: today, tomorrow: tomorrow, nowMinutes: nowMinutes };
+}
+
+// --- PLAYER SESSION LIMIT + STAFF APPROVAL ---------------------------------
+// Max TWO practice sessions per player per day across all active practice
+// locations. Barnes: every occupied 30-minute slot is one session. Other
+// locations: for the same player + date + location + court, two immediately
+// consecutive 30-minute slots combine into ONE 60-minute session (a session
+// holds at most two slots). Proximity warnings compare SESSION STARTS - never
+// the internal halves of a 60-minute session. Mirrors lib/session-rules.js.
+
+function groupPartsIntoSessions(parts) {
+  const byCourt = {};
+  parts.forEach(p => {
+    const k = String(p.location) + "|" + String(p.court);
+    if (!byCourt[k]) byCourt[k] = [];
+    byCourt[k].push(p);
+  });
+  const sessions = [];
+  for (const k in byCourt) {
+    const sorted = byCourt[k].sort(function (a, b) {
+      if (a.start !== b.start) return a.start - b.start;
+      return a.end - b.end;
+    });
+    // Barnes never merges consecutive slots: every 30-minute reservation there
+    // is one session of its own.
+    const isBarnes = sorted.length > 0 && /barnes/i.test(String(sorted[0].location || ""));
+    let current = null;
+    for (let i = 0; i < sorted.length; i++) {
+      const p = sorted[i];
+      if (current && !isBarnes && current.parts.length < 2 && current.end === p.start) {
+        current.parts.push(p);
+        current.end = p.end;
+      } else {
+        current = { start: p.start, end: p.end, parts: [p], location: p.location, court: p.court };
+        sessions.push(current);
+      }
+    }
+  }
+  return sessions;
+}
+
+function sessionsClose(a, b) {
+  if (Math.abs(a.start - b.start) < 60) return true; // starts within one hour
+  if (a.start === b.end || a.end === b.start) return true; // back-to-back
+  return false;
+}
+
+// Rechecks the session rules against FRESH sheet data (read inside the write
+// lock). `data.staffApproved` bypasses only the proximity warning; the hard
+// maximum of two sessions per player per day is never bypassed.
+function validateSessionRulesInGAS(ss, data) {
+  const names = cleanNames(data.names);
+  const slots = cleanSlots(data.slots);
+  if (!names.length || !slots.length) return; // bookGroup itself throws on this
+
+  // Active practice locations: the three defaults plus whatever the app's desk
+  // deliberately added (and the location being booked right now).
+  const active = PRACTICE_DEFAULT_LOCATIONS.slice();
+  (data.activeLocations || []).forEach(l => {
+    const v = String(l).trim();
+    if (v && active.indexOf(v) === -1) active.push(v);
+  });
+  if (active.indexOf(data.location) === -1) active.push(data.location);
+
+  const dateKey = String(data.date);
+  const schedule = readFullSchedule(ss); // fresh, inside the write lock
+  const reservations = schedule.reservations || {};
+
+  const proposedParts = [];
+  for (let i = 0; i < slots.length; i++) {
+    const range = slotRangeParts(slots[i]);
+    if (range) proposedParts.push({ start: range.start, end: range.end, location: data.location, court: String(data.courtId) });
+  }
+
+  const overLimit = [];
+  const warnings = [];
+  for (let ni = 0; ni < names.length; ni++) {
+    const name = names[ni];
+    const existingParts = [];
+    for (const key in reservations) {
+      const parts = key.split("|");
+      const location = parts[0];
+      if (active.indexOf(location) === -1) continue; // hidden sites don't count unless added
+      if (parts[1] !== dateKey) continue;
+      const court = parts[2];
+      const slotsMap = reservations[key];
+      for (const slotLabel in slotsMap) {
+        const players = slotsMap[slotLabel] || [];
+        if (players.indexOf(name) === -1) continue;
+        const range = slotRangeParts(slotLabel);
+        if (range) existingParts.push({ start: range.start, end: range.end, location: location, court: court });
+      }
+    }
+    // Hard limit: count the grouped sessions of the COMBINED state.
+    const combined = groupPartsIntoSessions(existingParts.concat(proposedParts));
+    if (combined.length > 2) overLimit.push(name);
+    // Proximity: compare each proposed session's start against every other
+    // session's start/end - never against the internal halves of one session.
+    const existingSessions = groupPartsIntoSessions(existingParts);
+    const proposedSessions = groupPartsIntoSessions(proposedParts);
+    const seen = [];
+    for (let pi = 0; pi < proposedSessions.length; pi++) {
+      const proposed = proposedSessions[pi];
+      for (let ei = 0; ei < existingSessions.length; ei++) {
+        if (sessionsClose(proposed, existingSessions[ei])) warnings.push({ player: name });
+      }
+      for (let si = 0; si < seen.length; si++) {
+        if (sessionsClose(proposed, seen[si])) warnings.push({ player: name });
+      }
+      seen.push(proposed);
+    }
+  }
+
+  if (overLimit.length) {
+    throw new Error(overLimit.join(", ") + (overLimit.length === 1 ? " has" : " have") + " already reached the maximum of 2 practice sessions for " + dateKey + ". The limit cannot be bypassed.");
+  }
+  if (warnings.length && data.staffApproved !== true) {
+    const who = [];
+    warnings.forEach(w => { if (who.indexOf(w.player) === -1) who.push(w.player); });
+    throw new Error("STAFF_APPROVAL_REQUIRED: Tournament staff approval is required for " + who.join(", ") + ". This booking places a practice session back-to-back with another session, or its start time is within one hour of another session's start time. Continue only if tournament staff have approved it.");
+  }
 }
 
 // --- WRITES ---

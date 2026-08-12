@@ -1,4 +1,5 @@
-import React, { useEffect } from 'react'
+import React, { useEffect, useState } from 'react'
+import { isSlotCompleted } from '../lib/booking-window'
 
 function formatTimeLabel(totalMinutes) {
   const hours = Math.floor(totalMinutes / 60)
@@ -52,7 +53,16 @@ function SpinnerIcon() {
   )
 }
 
-function Slot({ time, reservedBy = [], onClick, disabled, isOwnedByCurrentPlayer, isSaving }) {
+function EndedIcon() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="12" cy="12" r="10" />
+      <polyline points="12 6 12 12 16 14" />
+    </svg>
+  )
+}
+
+function Slot({ time, reservedBy = [], onClick, disabled, isOwnedByCurrentPlayer, isSaving, completed, viewOnly }) {
   const count = Array.isArray(reservedBy) ? reservedBy.length : 0
   const busy = count > 0
 
@@ -62,6 +72,16 @@ function Slot({ time, reservedBy = [], onClick, disabled, isOwnedByCurrentPlayer
     badgeClasses = 'bg-amber-100 text-amber-700'
     badgeText = 'Saving…'
     badgeIcon = <SpinnerIcon />
+  } else if (completed) {
+    containerClasses = 'bg-slate-100 border-slate-200 cursor-not-allowed opacity-70'
+    badgeClasses = 'bg-slate-200 text-slate-500'
+    badgeText = 'Ended'
+    badgeIcon = <EndedIcon />
+  } else if (viewOnly) {
+    containerClasses = 'bg-slate-50 border-slate-200 cursor-not-allowed opacity-80'
+    badgeClasses = 'bg-slate-200 text-slate-600'
+    badgeText = 'View only'
+    badgeIcon = <LockIcon />
   } else if (isOwnedByCurrentPlayer) {
     containerClasses = 'bg-emerald-50 border-emerald-200 hover:border-emerald-400 hover:bg-emerald-100 cursor-pointer'
     badgeClasses = 'bg-emerald-200/70 text-emerald-800'
@@ -79,10 +99,17 @@ function Slot({ time, reservedBy = [], onClick, disabled, isOwnedByCurrentPlayer
     badgeIcon = null
   }
 
+  const blockReason = completed
+    ? 'This time slot has already ended and can no longer be booked or canceled.'
+    : viewOnly
+      ? 'This day is view only. Reservations can only be booked or changed for today and tomorrow (America/Los_Angeles).'
+      : undefined
+
   return (
     <button
       onClick={onClick}
-      disabled={disabled || isSaving}
+      disabled={disabled || isSaving || completed || viewOnly}
+      title={blockReason}
       className={`w-full text-left px-4 py-3 rounded-xl border-2 transition-all duration-200 ${containerClasses}`}
     >
       <div className="flex justify-between items-start gap-2">
@@ -110,9 +137,18 @@ function Slot({ time, reservedBy = [], onClick, disabled, isOwnedByCurrentPlayer
 // Slot clicks are handed to the parent, which opens the shared group-booking
 // dialog: open slots start a booking with the signed-in player; slots the
 // signed-in player already holds open the cancellation dialog for the whole
-// group booked in that slot.
-export default function CourtSchedule({ court, date, location, reservations, currentPlayer = 'Alice Johnson', pendingReservations = {}, onOpenBooking, onPreviousCourt, onNextCourt, canGoPrevious = false, canGoNext = false, onClose }) {
+// group booked in that slot. View-only days and already-ended slots are
+// disabled here (and rechecked by the API and Apps Script).
+export default function CourtSchedule({ court, date, location, reservations, currentPlayer = 'Alice Johnson', pendingReservations = {}, viewOnly = false, onOpenBooking, onPreviousCourt, onNextCourt, canGoPrevious = false, canGoNext = false, onClose }) {
   if (!court) return null
+
+  // Re-evaluate "now" once a minute so ended slots and the booking window stay
+  // correct while the schedule stays open.
+  const [clockNow, setClockNow] = useState(() => new Date())
+  useEffect(() => {
+    const tick = setInterval(() => setClockNow(new Date()), 60_000)
+    return () => clearInterval(tick)
+  }, [])
 
   useEffect(() => {
     function handleKeyDown(event) {
@@ -203,6 +239,12 @@ export default function CourtSchedule({ court, date, location, reservations, cur
                 {myCount} yours
               </div>
             )}
+            {viewOnly && (
+              <div className="flex items-center gap-1.5 rounded-full bg-slate-500/30 px-3 py-1.5 text-xs font-medium text-slate-200">
+                <LockIcon />
+                View only — bookings and cancellations are limited to today and tomorrow
+              </div>
+            )}
           </div>
         </div>
 
@@ -226,6 +268,9 @@ export default function CourtSchedule({ court, date, location, reservations, cur
               const isReservedBySomeoneElse = players.length > 0 && !isOwnedByCurrentPlayer
               const requestKey = `${key}|${slot.label}|${currentPlayer}`
               const isSaving = Boolean(pendingReservations[requestKey])
+              // The current 30-minute slot stays usable until its end time;
+              // earlier slots are ended and locked.
+              const completed = !viewOnly && isSlotCompleted(slot.label, date, clockNow)
               return (
                 <Slot
                   key={slot.label}
@@ -234,6 +279,8 @@ export default function CourtSchedule({ court, date, location, reservations, cur
                   disabled={isReservedBySomeoneElse || isSaving}
                   isOwnedByCurrentPlayer={isOwnedByCurrentPlayer}
                   isSaving={isSaving}
+                  completed={completed}
+                  viewOnly={viewOnly}
                   onClick={() => {
                     if (isReservedBySomeoneElse) {
                       alert(`That slot is reserved by ${players.join(', ')}. You can only manage your own bookings.`)

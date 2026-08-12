@@ -123,6 +123,8 @@ test('books a whole group atomically via bookGroup', async () => {
     courtId: '6',
     slots: ['8:00 AM–8:30 AM', '8:30 AM–9:00 AM'],
     names: ['Abbey, Stephanie', 'Chen, Alice'],
+    staffApproved: false,
+    activeLocations: [],
   })
 })
 

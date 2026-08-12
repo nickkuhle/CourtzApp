@@ -3,17 +3,26 @@ import Head from 'next/head'
 import CourtGrid from '../components/CourtGrid'
 import CourtSchedule from '../components/CourtSchedule'
 import GroupBookingModal from '../components/GroupBookingModal'
+import { getBookingWindowKeys, isBookableDateKey, isSlotCompleted, validateBookingWindow } from '../lib/booking-window'
+import { validateSessionBooking, formatSessionWarning, PRACTICE_DEFAULT_LOCATIONS } from '../lib/session-rules'
 
 const LOGO_URL = '/logo.svg'
 
 // Fallbacks used only when the sheet cannot be reached or a legacy deployment
-// does not report metadata. Once the v2.0 Apps Script is live, every date,
+// does not report metadata. Once the v2.x Apps Script is live, every date,
 // location and court below comes straight from the sheet.
-const FALLBACK_LOCATIONS = [
-  'Barnes Tennis Center',
-  'Peninsula Tennis Club',
-  'Point Loma Nazarene College',
-]
+const FALLBACK_LOCATIONS = PRACTICE_DEFAULT_LOCATIONS
+
+// Sites that are hidden by default because they are match-play venues. They
+// can be added deliberately with the + button, which also makes their
+// reservations count toward practice-session limits.
+const MATCH_PLAY_HINTS = {
+  'USD': 'Match play site',
+  'Pacific Beach Tennis Club': 'Match play site',
+  'Balboa Tennis Center': 'Match play site',
+}
+
+const ACTIVE_LOCATIONS_STORAGE_KEY = 'courtz.activeLocations.v1'
 
 const FALLBACK_COURTS_BY_LOCATION = {
   'Barnes Tennis Center': [4, 5, 6],
@@ -160,17 +169,26 @@ function findCourtsForBooking(courtsList, reservations, location, dateKey, slots
     .sort((a, b) => Number(b.mine) - Number(a.mine) || a.courtId - b.courtId)
 }
 
-// Same "max 2 sessions per player per day" rule the court schedule modal
-// enforces, counting a player's bookings at one venue on one date.
-function countPlayerSessions(reservations, location, dateKey, name) {
-  const prefix = `${location}|${dateKey}`
-  return Object.keys(reservations).reduce((acc, key) => {
-    if (!key.startsWith(prefix)) return acc
-    Object.values(reservations[key] || {}).forEach((players) => {
-      if (Array.isArray(players) && players.includes(name)) acc++
-    })
-    return acc
-  }, 0)
+// Practice sites deliberately added by the desk are remembered in the browser
+// so they stay visible between visits. (Session-limit counting uses
+// lib/session-rules.js, which counts sessions across all active practice
+// locations and groups 60-minute pairs.)
+function readSavedExtraLocations() {
+  try {
+    const raw = window.localStorage.getItem(ACTIVE_LOCATIONS_STORAGE_KEY)
+    const parsed = JSON.parse(raw || '[]')
+    return Array.isArray(parsed) ? [...new Set(parsed.filter((x) => typeof x === 'string'))] : []
+  } catch {
+    return []
+  }
+}
+
+function persistExtraLocations(list) {
+  try {
+    window.localStorage.setItem(ACTIVE_LOCATIONS_STORAGE_KEY, JSON.stringify(list))
+  } catch {
+    // Storage unavailable (private mode) - the session still works in memory.
+  }
 }
 
 export default function Home() {
@@ -178,6 +196,9 @@ export default function Home() {
   const [days, setDays] = useState([])
   const [selectedDay, setSelectedDay] = useState('')
   const [locations, setLocations] = useState(FALLBACK_LOCATIONS)
+  const [extraLocations, setExtraLocations] = useState([])
+  const [showAddLocation, setShowAddLocation] = useState(false)
+  const [clockNow, setClockNow] = useState(() => new Date())
   const [courtsByDate, setCourtsByDate] = useState({})
   const [selectedLocation, setSelectedLocation] = useState('')
   const [selectedCourt, setSelectedCourt] = useState(null)
@@ -200,6 +221,12 @@ export default function Home() {
 
   useEffect(() => {
     setMounted(true)
+    setExtraLocations(readSavedExtraLocations())
+    // Refresh the clock every minute so ended time slots and the bookable
+    // window (today/tomorrow in America/Los_Angeles) stay correct while the
+    // page is open.
+    const tick = setInterval(() => setClockNow(new Date()), 60_000)
+    return () => clearInterval(tick)
   }, [])
 
   useEffect(() => {
@@ -261,16 +288,57 @@ export default function Home() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [rosterLoaded])
 
+  // Booking window in America/Los_Angeles: only today and tomorrow can be
+  // booked or changed. Everything else stays clickable but view only.
+  const bookingWindow = useMemo(() => getBookingWindowKeys(clockNow), [clockNow])
+  const selectedDayBookable = useMemo(
+    () => isBookableDateKey(selectedDay, clockNow),
+    [selectedDay, clockNow],
+  )
+
+  // Visible practice sites: the three default practice venues plus any site
+  // the desk deliberately added with the + button (remembered in the browser).
+  // Everything else the sheet reports (match-play sites, new tabs) is offered
+  // through the + menu.
+  const visibleLocations = useMemo(() => {
+    const defaults = PRACTICE_DEFAULT_LOCATIONS.filter((loc) => locations.includes(loc))
+    const extras = extraLocations.filter((loc) => locations.includes(loc) && !defaults.includes(loc))
+    return [...defaults, ...extras]
+  }, [locations, extraLocations])
+
+  const addableLocations = useMemo(
+    () => locations.filter((loc) => !visibleLocations.includes(loc)),
+    [locations, visibleLocations],
+  )
+
+  function addPracticeLocation(loc) {
+    setExtraLocations((prev) => {
+      const next = prev.includes(loc) ? prev : [...prev, loc]
+      persistExtraLocations(next)
+      return next
+    })
+    setShowAddLocation(false)
+  }
+
+  function removePracticeLocation(loc) {
+    setExtraLocations((prev) => {
+      const next = prev.filter((x) => x !== loc)
+      persistExtraLocations(next)
+      return next
+    })
+    if (selectedLocation === loc) setSelectedLocation(PRACTICE_DEFAULT_LOCATIONS[0])
+  }
+
   // Keep the default selection in sync with the very first data load.
   useEffect(() => {
     if (days.length && !selectedDay) {
       setSelectedDay(pickDefaultDay(days, new Date()))
     }
-    if (days.length && !selectedLocation) {
-      setSelectedLocation(locations[0])
+    if (visibleLocations.length && (!selectedLocation || !visibleLocations.includes(selectedLocation))) {
+      setSelectedLocation(visibleLocations[0])
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [days.length])
+  }, [days.length, visibleLocations.length])
 
   useEffect(() => {
     setReservations((prev) => {
@@ -330,6 +398,15 @@ export default function Home() {
     return parts
   }, [findTime, findDuration])
 
+  // Whether the second half of a 60-minute window at the chosen start time has
+  // already ended (that half could then never be booked).
+  const findSecondPartEnded = useMemo(() => {
+    if (!findTime || selectedDay !== bookingWindow.today) return false
+    const startMinutes = timeLabelToMinutes(findTime.split('–')[0])
+    const second = `${formatTimeLabel(startMinutes + 30)}–${formatTimeLabel(startMinutes + 60)}`
+    return isSlotCompleted(second, selectedDay, clockNow)
+  }, [findTime, selectedDay, bookingWindow.today, clockNow])
+
   // Recomputed on every render of the modal, so results stay accurate even
   // right after a booking is made from inside Find a Court.
   const findCourts = useMemo(() => {
@@ -347,7 +424,7 @@ export default function Home() {
   // The optimistic UI change is applied immediately, then the whole group is
   // written to the sheet in one request; on failure every name is rolled back
   // so a half-saved group is never shown or stored.
-  async function handleGroupWrite({ mode, location, date, courtId, slots, names }) {
+  async function handleGroupWrite({ mode, location, date, courtId, slots, names, staffApproved = false, activeLocations = [] }) {
     const reservationKey = `${location}|${date}|${courtId}`
     const requestKey = `${mode}|${reservationKey}|${slots.join(',')}|${names.join(',')}`
     if (pendingReservations[requestKey]) return
@@ -384,7 +461,7 @@ export default function Home() {
       const response = await fetch('/api/reservations', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: mode, location, date, courtId, slots, names }),
+        body: JSON.stringify({ action: mode, location, date, courtId, slots, names, staffApproved, activeLocations }),
       })
       if (!response.ok) {
         let message = 'Unable to save reservation'
@@ -422,7 +499,11 @@ export default function Home() {
     }
   }
 
-  async function handleConfirmGroupBooking(players) {
+  // `opts.staffApproved` is set when the desk already confirmed the staff
+  // approval prompt. Returns { approvalRequired } when the modal should show
+  // the tournament-staff approval prompt instead of closing; throws on hard
+  // errors (which the modal shows inline).
+  async function handleConfirmGroupBooking(players, opts = {}) {
     const modal = bookingModal
     if (!modal) return
     const slots = modal.slots
@@ -430,19 +511,57 @@ export default function Home() {
     const names = [...new Set(players.map((n) => String(n).trim()).filter(Boolean))]
 
     if (modal.mode === 'book') {
-      // Max 2 sessions per player per day - checked for every member so one
-      // player can never exceed the limit by riding along on a group.
-      const overLimit = names.filter((n) => countPlayerSessions(reservations, modal.location, modal.date, n) >= 2)
-      if (overLimit.length) {
-        throw new Error(`${overLimit.join(', ')} already ${overLimit.length === 1 ? 'has' : 'have'} 2 sessions that day.`)
+      // Max 2 sessions per player per day across all active practice
+      // locations, plus the staff-approval proximity warning. Checked for
+      // EVERY member so one player can never exceed the limit by riding along
+      // on a group. The API and Apps Script repeat both checks server-side.
+      const validation = validateSessionBooking({
+        reservations,
+        activeLocations: visibleLocations,
+        location: modal.location,
+        date: modal.date,
+        courtId: modal.courtId,
+        slots,
+        names,
+      })
+      if (validation.overLimit.length) {
+        throw new Error(
+          `${validation.overLimit.join(', ')} already ${validation.overLimit.length === 1 ? 'has' : 'have'} the maximum of 2 practice sessions for that day. The limit cannot be bypassed.`,
+        )
       }
-      await handleGroupWrite({ mode: 'book', location: modal.location, date: modal.date, courtId: modal.courtId, slots, names })
+      if (validation.warnings.length && !opts.staffApproved) {
+        const who = [...new Set(validation.warnings.map((w) => w.player))]
+        return { approvalRequired: { names: who, message: formatSessionWarning(who) } }
+      }
+      try {
+        await handleGroupWrite({
+          mode: 'book',
+          location: modal.location,
+          date: modal.date,
+          courtId: modal.courtId,
+          slots,
+          names,
+          staffApproved: opts.staffApproved === true,
+          activeLocations: visibleLocations,
+        })
+      } catch (e) {
+        // The backend may know about reservations this browser had not seen
+        // yet (stale data). If the fresh server-side check finds the sessions
+        // are too close, show the approval prompt again instead of failing.
+        if (/STAFF_APPROVAL_REQUIRED|staff approval is required/i.test(e?.message || '')) {
+          return { approvalRequired: { names, message: e.message.replace(/^STAFF_APPROVAL_REQUIRED:\s*/i, '') } }
+        }
+        throw e
+      }
       setBookingModal(null)
       if (modal.origin === 'find') {
         setFindNotice(`Booked Court ${modal.courtId} at ${LOCATION_SHORT[modal.location] || modal.location} for ${slots.join(' and ')}.`)
         setFindTime('')
       }
     } else {
+      // Canceling is a change too, so the booking window applies. The API and
+      // Apps Script recheck this (and the UI already hides ended slots).
+      validateBookingWindow({ date: modal.date, slots })
       await handleGroupWrite({ mode: 'cancel', location: modal.location, date: modal.date, courtId: modal.courtId, slots, names })
       setBookingModal(null)
       if (modal.origin === 'find') {
@@ -461,8 +580,18 @@ export default function Home() {
 
   // Find a Court result: open the group-booking dialog for the chosen court
   // (or the cancellation dialog when the current player already has a booking
-  // in the window).
+  // in the window). View-only days and already-ended times cannot be booked
+  // or canceled from here.
   function handleFindCourtPick(courtId) {
+    if (!selectedDayBookable) {
+      setFindNotice('This day is view only. Reservations can only be booked or changed for today and tomorrow (America/Los_Angeles).')
+      return
+    }
+    const endedPart = findSlots.find((slot) => isSlotCompleted(slot, selectedDay, clockNow))
+    if (endedPart) {
+      setFindNotice(`That time has already ended (${endedPart}). Pick a later start time.`)
+      return
+    }
     const players = findSlots.flatMap((slot) => reservations[`${findLocation}|${selectedDay}|${courtId}`]?.[slot] || [])
     const mine = players.includes(currentPlayer)
     if (mine) {
@@ -506,8 +635,12 @@ export default function Home() {
     setShowFindCourt(false)
   }
 
-  // Called by the CourtSchedule modal when a slot is tapped.
+  // Called by the CourtSchedule modal when a slot is tapped. View-only days
+  // and already-ended slots never reach this (their buttons are disabled),
+  // but the guard is kept as a second line of defense.
   function handleOpenBooking({ mode, slots, players }) {
+    if (!selectedDayBookable) return
+    if (slots.some((slot) => isSlotCompleted(slot, selectedDay, clockNow))) return
     const dateObj = new Date(selectedDay + 'T12:00:00')
     setBookingModal({
       origin: 'schedule',
@@ -561,7 +694,7 @@ export default function Home() {
               Find a Court
             </button>
             <div className="relative flex items-center gap-1.5 rounded-full border border-emerald-400/70 bg-emerald-500 px-2.5 py-1.5 shadow-sm shadow-emerald-500/20">
-              <span className="text-xs font-medium text-white whitespace-nowrap hidden sm:block">Signed in as</span>
+              <span className="text-xs font-medium text-white whitespace-nowrap hidden sm:block">Booking Courts As</span>
               <div className="relative">
                 <input
                   type="text"
@@ -570,10 +703,14 @@ export default function Home() {
                     setPlayerSearch(e.target.value)
                     setShowPlayerDropdown(true)
                   }}
-                  onFocus={() => {
+                  onFocus={(e) => {
                     setPlayerSearch(currentPlayer)
                     setShowPlayerDropdown(true)
+                    // Select the entire current name so typing immediately
+                    // replaces it.
+                    requestAnimationFrame(() => e.target.select())
                   }}
+                  onMouseUp={(e) => e.preventDefault()}
                   onBlur={() => setTimeout(() => setShowPlayerDropdown(false), 150)}
                   onKeyDown={(e) => {
                     if (e.key === 'Enter') {
@@ -663,10 +800,13 @@ export default function Home() {
             <div className="flex gap-2 overflow-x-auto pb-2 px-1 -mx-1 scrollbar-thin justify-center">
               {days.map((d) => {
                 const isActive = selectedDay === d.key
+                const bookable = isBookableDateKey(d.key, clockNow)
+                const isTomorrow = d.key === bookingWindow.tomorrow
                 return (
                   <button
                     key={d.key}
                     onClick={() => { setSelectedDay(d.key); setSelectedCourt(null) }}
+                    title={bookable ? 'Bookings can be made or changed for this day.' : 'View only — bookings can be made or changed for today and tomorrow only.'}
                     className={`flex flex-col items-center min-w-[4rem] px-3 py-2 rounded-xl border-2 transition-all duration-200 shrink-0 ${
                       isActive
                         ? 'bg-[#1f5f99] border-[#1f5f99] text-white shadow-lg shadow-blue-900/20'
@@ -675,9 +815,17 @@ export default function Home() {
                   >
                     <span className={`text-xs font-medium ${isActive ? 'text-blue-200' : 'text-slate-400'}`}>{d.dayName}</span>
                     <span className="text-lg font-bold leading-tight">{d.dayNum}</span>
-                    {d.isToday && (
-                      <span className={`text-[10px] font-semibold mt-0.5 px-1.5 py-0.5 rounded-full ${isActive ? 'bg-emerald-400/30 text-emerald-200' : 'bg-emerald-100 text-emerald-700'}`}>Today</span>
-                    )}
+                    <span className="h-[18px] mt-0.5 flex items-center">
+                      {d.isToday && (
+                        <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded-full ${isActive ? 'bg-emerald-400/30 text-emerald-200' : 'bg-emerald-100 text-emerald-700'}`}>Today</span>
+                      )}
+                      {!d.isToday && isTomorrow && (
+                        <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded-full ${isActive ? 'bg-emerald-400/30 text-emerald-200' : 'bg-emerald-100 text-emerald-700'}`}>Tomorrow</span>
+                      )}
+                      {!bookable && (
+                        <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded-full ${isActive ? 'bg-slate-500/40 text-slate-200' : 'bg-slate-200 text-slate-500'}`}>View only</span>
+                      )}
+                    </span>
                   </button>
                 )
               })}
@@ -693,8 +841,9 @@ export default function Home() {
             <div className="h-px flex-1 max-w-[8rem] bg-slate-200" />
           </div>
           <div className="flex flex-wrap justify-center gap-2">
-            {locations.map((loc) => {
+            {visibleLocations.map((loc) => {
               const isActive = selectedLocation === loc
+              const isExtra = !PRACTICE_DEFAULT_LOCATIONS.includes(loc)
               return (
                 <button
                   key={loc}
@@ -710,11 +859,92 @@ export default function Home() {
                     <circle cx="12" cy="10" r="3" />
                   </svg>
                   <span className="text-sm font-medium">{loc}</span>
+                  {isExtra && (
+                    <span
+                      role="button"
+                      tabIndex={0}
+                      aria-label={`Hide ${loc}`}
+                      title="Hide this location"
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        removePracticeLocation(loc)
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' || e.key === ' ') {
+                          e.stopPropagation()
+                          removePracticeLocation(loc)
+                        }
+                      }}
+                      className={`ml-0.5 -mr-1 rounded-full p-1 leading-none ${isActive ? 'text-white/70 hover:text-white hover:bg-white/20' : 'text-slate-400 hover:text-slate-600 hover:bg-slate-100'}`}
+                    >
+                      <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg>
+                    </span>
+                  )}
                 </button>
               )
             })}
+            <div className="relative">
+              <button
+                type="button"
+                onClick={() => setShowAddLocation((v) => !v)}
+                aria-label="Add another practice location"
+                title="Add another site that is configured as a court-grid tab in the Google Sheet"
+                className="flex items-center justify-center w-[38px] h-[38px] rounded-xl border-2 border-dashed border-slate-300 bg-white/60 text-slate-500 hover:border-[#1f5f99] hover:text-[#1f5f99] hover:bg-blue-50 transition-all duration-200"
+              >
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" /></svg>
+              </button>
+              {showAddLocation && (
+                <>
+                  <div className="fixed inset-0 z-40" onClick={() => setShowAddLocation(false)} />
+                  <div className="absolute z-50 top-full mt-2 left-1/2 -translate-x-1/2 w-72 rounded-xl border border-slate-200 bg-white shadow-xl overflow-hidden">
+                    <div className="px-3 py-2 text-xs font-semibold uppercase tracking-wider text-slate-400 bg-slate-50 border-b border-slate-100">Add another site</div>
+                    {addableLocations.length === 0 ? (
+                      <div className="px-4 py-3 text-sm text-slate-400">No other court-grid tabs were found in the Google Sheet.</div>
+                    ) : (
+                      <div className="max-h-60 overflow-auto">
+                        {addableLocations.map((loc) => (
+                          <button
+                            key={loc}
+                            type="button"
+                            onClick={() => addPracticeLocation(loc)}
+                            className="w-full text-left px-4 py-2.5 text-sm text-slate-700 hover:bg-emerald-50 transition flex items-center justify-between gap-2"
+                          >
+                            <span className="flex items-center gap-2">
+                              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-slate-400">
+                                <path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z" />
+                                <circle cx="12" cy="10" r="3" />
+                              </svg>
+                              {loc}
+                            </span>
+                            {MATCH_PLAY_HINTS[loc] && (
+                              <span className="text-[10px] font-semibold uppercase tracking-wide text-amber-600 bg-amber-50 border border-amber-200 rounded-full px-2 py-0.5 whitespace-nowrap">
+                                {MATCH_PLAY_HINTS[loc]}
+                              </span>
+                            )}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </>
+              )}
+            </div>
           </div>
         </div>
+
+        {/* View-only notice: days outside the bookable window stay clickable
+            for reviewing reservations, but nothing can be booked or changed. */}
+        {days.length > 0 && !selectedDayBookable && (
+          <div className="mb-6 flex flex-wrap items-center gap-3 rounded-2xl border border-amber-300 bg-amber-50 px-4 py-3 text-amber-900 shadow-sm" role="alert">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="shrink-0 text-amber-500">
+              <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
+              <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+            </svg>
+            <div className="min-w-[12rem] flex-1 text-sm leading-relaxed">
+              <span className="font-semibold">View only day.</span> Reservations can only be booked or changed for <span className="font-semibold">today ({bookingWindow.today})</span> and <span className="font-semibold">tomorrow ({bookingWindow.tomorrow})</span> (America/Los_Angeles). Pick one of those days to book or cancel.
+            </div>
+          </div>
+        )}
 
         {/* Court Grid */}
         <section className="mb-6">
@@ -757,8 +987,8 @@ export default function Home() {
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#1f5f99" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="4" width="18" height="18" rx="2" ry="2" /><line x1="16" y1="2" x2="16" y2="6" /><line x1="8" y1="2" x2="8" y2="6" /><line x1="3" y1="10" x2="21" y2="10" /></svg>
               </div>
               <div>
-                <div className="text-sm font-semibold text-slate-700">30-min sessions</div>
-                <div className="text-xs text-slate-500">Practice slots are 30 minutes. Max 2 sessions per player per day. Barnes offers 30-minute bookings only.</div>
+                <div className="text-sm font-semibold text-slate-700">Sessions &amp; limits</div>
+                <div className="text-xs text-slate-500">Practice slots are 30 minutes; Peninsula and PLNU also offer 1-hour bookings. Max 2 sessions per player per day. Sessions that are back-to-back or start within one hour of each other need tournament staff approval.</div>
               </div>
             </div>
           </div>
@@ -825,11 +1055,20 @@ export default function Home() {
             </div>
 
             <div className="p-4 max-h-[60vh] overflow-auto space-y-4">
+              {!selectedDayBookable && (
+                <div className="flex items-start gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2.5 text-sm text-amber-800">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="shrink-0 mt-0.5">
+                    <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
+                    <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+                  </svg>
+                  <span><span className="font-semibold">View only day.</span> You can find and review courts, but bookings and cancellations are only possible for today and tomorrow (America/Los_Angeles).</span>
+                </div>
+              )}
               {/* Step 1 — Location */}
               <div>
                 <div className="text-xs font-semibold uppercase tracking-wider text-slate-500 mb-2">1. Location</div>
                 <div className="flex flex-wrap gap-2">
-                  {locations.map((loc) => {
+                  {visibleLocations.map((loc) => {
                     const isActive = findLocation === loc
                     return (
                       <button
@@ -855,15 +1094,20 @@ export default function Home() {
                 <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
                   {THIRTY_MIN_SLOTS.map((slot) => {
                     const isActive = findTime === slot
+                    // Ended 30-minute parts cannot be booked. The CURRENT
+                    // 30-minute slot stays selectable until it ends.
+                    const ended = isSlotCompleted(slot, selectedDay, clockNow)
                     return (
                       <button
                         key={slot}
                         type="button"
+                        disabled={ended}
                         onClick={() => { setFindTime(slot); setFindNotice(null) }}
+                        title={ended ? 'This time has already ended' : `Start at ${slot.split('–')[0]}`}
                         className={`rounded-lg border-2 px-2 py-1.5 text-xs font-medium transition ${
                           isActive
                             ? 'border-[#1f5f99] bg-[#1f5f99] text-white'
-                            : 'border-slate-200 bg-white text-slate-600 hover:border-slate-300'
+                            : 'border-slate-200 bg-white text-slate-600 hover:border-slate-300 disabled:cursor-not-allowed disabled:opacity-40 disabled:line-through'
                         }`}
                       >
                         {slot.split('–')[0]}
@@ -896,8 +1140,14 @@ export default function Home() {
                     <button
                       type="button"
                       onClick={() => { if (timeLabelToMinutes(findTime.split('–')[0]) <= 17 * 60 + 30) { setFindDuration(60); setFindNotice(null) } }}
-                      disabled={findTime && timeLabelToMinutes(findTime.split('–')[0]) > 17 * 60 + 30}
-                      title={findTime && timeLabelToMinutes(findTime.split('–')[0]) > 17 * 60 + 30 ? 'A 1-hour booking must start by 5:30 PM' : '1 hour'}
+                      disabled={!findTime || findSecondPartEnded || timeLabelToMinutes(findTime.split('–')[0]) > 17 * 60 + 30}
+                      title={
+                        findSecondPartEnded
+                          ? 'The second half of this hour has already ended'
+                          : findTime && timeLabelToMinutes(findTime.split('–')[0]) > 17 * 60 + 30
+                            ? 'A 1-hour booking must start by 5:30 PM'
+                            : '1 hour'
+                      }
                       className={`rounded-lg border-2 px-3 py-2 text-sm font-medium transition ${
                         findDuration === 60
                           ? 'border-[#1f5f99] bg-[#1f5f99] text-white'
@@ -907,6 +1157,9 @@ export default function Home() {
                       1 hour
                     </button>
                   </div>
+                )}
+                {findSecondPartEnded && (
+                  <p className="mt-1.5 text-xs text-amber-700">The second half of that hour has already ended, so only a 30-minute booking is possible.</p>
                 )}
                 {findTime && findDuration === 60 && timeLabelToMinutes(findTime.split('–')[0]) > 17 * 60 + 30 && (
                   <p className="mt-1.5 text-xs text-amber-700">A 1-hour booking must start by 5:30 PM.</p>
@@ -987,6 +1240,7 @@ export default function Home() {
           roster={roster}
           currentPlayer={currentPlayer}
           pendingReservations={pendingReservations}
+          viewOnly={!selectedDayBookable}
           onOpenBooking={handleOpenBooking}
           canGoPrevious={selectedCourtIndex > 0}
           canGoNext={selectedCourtIndex >= 0 && selectedCourtIndex < courts.length - 1}

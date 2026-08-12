@@ -62,4 +62,4 @@ SHEETS_WEBAPP_URL=http://127.0.0.1:3100/exec npm run dev   # terminal 2
 ```
 
 See [INTEGRATION_GUIDE.md](./INTEGRATION_GUIDE.md) for the step-by-step setup,
-testing checklist, and the instructions for redeploying the Apps Script (v2.0).
+testing checklist, and the instructions for redeploying the Apps Script (v2.1).

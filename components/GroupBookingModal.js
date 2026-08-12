@@ -49,6 +49,7 @@ export default function GroupBookingModal({
   const [showDropdown, setShowDropdown] = useState(false)
   const [error, setError] = useState(null)
   const [saving, setSaving] = useState(false)
+  const [approval, setApproval] = useState(null) // {names, message} -> show the staff-approval prompt
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase()
@@ -72,7 +73,7 @@ export default function GroupBookingModal({
     setError(null)
   }
 
-  async function handleConfirm() {
+  async function handleConfirm(staffApproved = false) {
     if (players.length === 0) {
       setError(mode === 'cancel' ? 'There are no players to cancel.' : 'Add at least one player before confirming.')
       return
@@ -80,9 +81,14 @@ export default function GroupBookingModal({
     setSaving(true)
     setError(null)
     try {
-      await onConfirm(players)
-      // Parent closes the modal on success; keep it open on failure so the desk
-      // can retry or adjust the group.
+      const result = await onConfirm(players, { staffApproved })
+      // The parent closes the modal on success and keeps it open on failure so
+      // the desk can retry or adjust the group. When the session rules require
+      // tournament staff approval, the parent returns { approvalRequired } and
+      // this modal shows the explicit approval prompt instead.
+      if (result && result.approvalRequired) {
+        setApproval(result.approvalRequired)
+      }
     } catch (e) {
       setError(e?.message || 'The booking could not be saved. Please try again.')
     } finally {
@@ -204,29 +210,71 @@ export default function GroupBookingModal({
               {error}
             </div>
           )}
+
+          {/* Staff-approval prompt: shown when the booking places a session
+              back-to-back with another session or within one hour of another
+              session's start. The override applies ONLY to this warning - the
+              hard 2-sessions-per-day limit can never be bypassed. */}
+          {approval && (
+            <div className="rounded-xl border border-amber-300 bg-amber-50 px-4 py-3" role="alert">
+              <div className="flex items-start gap-2.5">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#d97706" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="shrink-0 mt-0.5">
+                  <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
+                  <line x1="12" y1="9" x2="12" y2="13" />
+                  <line x1="12" y1="17" x2="12.01" y2="17" />
+                </svg>
+                <div className="text-sm text-amber-900 leading-relaxed">
+                  <div className="font-semibold">Tournament staff approval is required.</div>
+                  <div className="mt-0.5">{approval.message || `This booking places ${(approval.names || []).join(', ')}'s practice session back-to-back with another session or within one hour of another session's start time.`}</div>
+                  <div className="mt-1 text-xs text-amber-700">Continue only if tournament staff have approved this booking. The maximum of 2 sessions per player per day still applies.</div>
+                </div>
+              </div>
+            </div>
+          )}
         </div>
 
         {/* Footer */}
-        <div className="flex items-center justify-end gap-3 border-t border-slate-100 px-5 py-4 bg-slate-50/60">
-          <button
-            type="button"
-            onClick={onClose}
-            disabled={busy || saving}
-            className="rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-medium text-slate-600 hover:bg-slate-100 transition disabled:opacity-50"
-          >
-            Close
-          </button>
-          <button
-            type="button"
-            onClick={handleConfirm}
-            disabled={busy || saving}
-            className={`rounded-xl px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition disabled:opacity-60 ${
-              mode === 'cancel' ? 'bg-rose-600 hover:bg-rose-700 shadow-rose-600/20' : 'bg-emerald-600 hover:bg-emerald-700 shadow-emerald-600/20'
-            }`}
-          >
-            {saving ? 'Saving…' : label}
-          </button>
-        </div>
+        {approval ? (
+          <div className="flex items-center justify-end gap-3 border-t border-slate-100 px-5 py-4 bg-amber-50/60">
+            <button
+              type="button"
+              onClick={() => setApproval(null)}
+              disabled={busy || saving}
+              className="rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-medium text-slate-600 hover:bg-slate-100 transition disabled:opacity-50"
+            >
+              Go back
+            </button>
+            <button
+              type="button"
+              onClick={() => handleConfirm(true)}
+              disabled={busy || saving}
+              className="rounded-xl px-4 py-2.5 text-sm font-semibold text-white bg-amber-600 hover:bg-amber-700 shadow-sm shadow-amber-600/20 transition disabled:opacity-60"
+            >
+              {saving ? 'Saving…' : 'Confirm — staff approved'}
+            </button>
+          </div>
+        ) : (
+          <div className="flex items-center justify-end gap-3 border-t border-slate-100 px-5 py-4 bg-slate-50/60">
+            <button
+              type="button"
+              onClick={onClose}
+              disabled={busy || saving}
+              className="rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-medium text-slate-600 hover:bg-slate-100 transition disabled:opacity-50"
+            >
+              Close
+            </button>
+            <button
+              type="button"
+              onClick={() => handleConfirm(false)}
+              disabled={busy || saving}
+              className={`rounded-xl px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition disabled:opacity-60 ${
+                mode === 'cancel' ? 'bg-rose-600 hover:bg-rose-700 shadow-rose-600/20' : 'bg-emerald-600 hover:bg-emerald-700 shadow-emerald-600/20'
+              }`}
+            >
+              {saving ? 'Saving…' : label}
+            </button>
+          </div>
+        )}
       </div>
     </div>
   )

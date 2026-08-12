@@ -29,6 +29,13 @@ the write either fully succeeds or fully fails (half of a group is never saved).
 - **Find a Court** uses the day selected on the main page, and asks for location, start time and length instead of a fixed time list. Barnes allows 30-minute bookings only; the other locations allow 30 minutes or 1 hour. A 1-hour court is offered only when both of its 30-minute parts are open.
 - **Group bookings.** Booking starts with the signed-in player, more players can be searched from the roster and added, and every selected player is shown before confirming. Canceling a slot removes the whole group that was booked there.
 
+## What is new in v2.1
+
+- **Booking window.** Reservations can only be booked or changed for **today and tomorrow in America/Los_Angeles time** (not the device/server timezone). All other days stay clickable but are marked **View only**. Ended 30-minute slots cannot be booked or canceled; the current 30-minute slot stays available until it ends. Enforced in the UI, the Next.js API and Apps Script (under the write lock).
+- **Session limit + staff approval.** Max **2 practice sessions per player per day across all active practice locations**. At Barnes every 30-minute reservation is one session; elsewhere two adjacent 30-minute slots on the same court combine into one 60-minute session. Sessions that are back-to-back or start within one hour of each other need an explicit **"Confirm — staff approved"** step. The staff override bypasses only the close-timing warning - the hard maximum of two sessions can never be bypassed. Apps Script rechecks with fresh sheet data under its write lock.
+- **Practice locations.** Barnes, Peninsula and PLNU are shown by default. USD, Balboa and Pacific Beach are hidden (match-play sites) and their reservations do not count toward session limits unless the desk deliberately adds them with the **+** button (remembered in the browser). New Sheet tabs using the date/court grid layout are discovered automatically and appear in the + menu.
+- **Player picker.** The pill now reads **"Booking Courts As"**, and focusing the name input selects the whole name so typing replaces it.
+
 ## How to test it
 
 1. Open Courtz and wait for the green **Google Sheet connected** message.
@@ -40,9 +47,9 @@ the write either fully succeeds or fully fails (half of a group is never saved).
 7. Try **Find a Court** for a non-Barnes venue with length **1 hour**: a court should only appear when both 30-minute parts are free.
 8. Open Barnes in Find a Court: only 30-minute bookings should be offered.
 
-## How to redeploy the Apps Script (v2.0)
+## How to redeploy the Apps Script (v2.1)
 
-The repository now contains version **2.0** of `CourtzAppsScript.gs`. To put it live:
+The repository now contains version **2.1** of `CourtzAppsScript.gs`. To put it live:
 
 1. Open the **test copy** of the Google Sheet.
 2. Click **Extensions → Apps Script**.
@@ -55,13 +62,16 @@ The repository now contains version **2.0** of `CourtzAppsScript.gs`. To put it 
    - **Execute as:** Me
    - **Who has access:** Anyone
 
+The existing `/exec` URL stays the same because you are editing the existing
+deployment - do NOT create a second deployment.
+
 To check which version is live, open:
 
 ```text
 https://script.google.com/macros/s/AKfycbzlHIg__YqQdq9ohWvFdu9wCZZ27S5XPTYeBCV3y9IdDx1AZmZjs7vaV3rcZVz2lFaW6g/exec?action=ping
 ```
 
-It should show `"success":true` and `"version":"2.0"`.
+It should show `"success":true` and `"version":"2.1"`.
 
 > If you ever see an old version here, the deployment was not updated (step 6/7) or
 > the script code in the Apps Script editor was not saved.
