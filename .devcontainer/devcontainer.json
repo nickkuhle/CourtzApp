@@ -18,8 +18,9 @@
   },
   "portsAttributes": {
     "3000": {
-      "label": "Application",
-      "onAutoForward": "openPreview"
+      "label": "Courtz web app",
+      "protocol": "http",
+      "onAutoForward": "notify"
     }
   },
   "forwardPorts": [3000]

@@ -18,10 +18,40 @@ The connection URL is used only by the Next.js server. When it is time to switch
 
 ```bash
 npm install
-npm run dev      # start the dev server
+npm run dev      # start the dev server on 0.0.0.0:3000
 npm test         # parser + adapter tests (node --test)
 npm run build    # production build
 ```
+
+### GitHub Codespaces on iPhone or iPad
+
+The Codespaces configuration forwards port 3000 as **HTTP** and shows a
+notification instead of loading the app in VS Code's embedded Simple Browser.
+This is intentional: the embedded preview and its private-port authentication
+handoff are unreliable in some iOS/iPadOS browser sessions.
+
+After the terminal says `Ready`:
+
+1. Tap **Open in Browser** in the forwarded-port notification, or open the
+   **Ports** panel and tap the globe icon for **Courtz web app (3000)**.
+2. Open the generated `https://<codespace-name>-3000.app.github.dev` address.
+   Do not browse to `localhost:3000`, and do not choose **Preview in Editor**.
+3. In the Ports panel, leave **Port Protocol** set to **HTTP**. The public-facing
+   URL is still HTTPS; Codespaces terminates HTTPS before proxying plain HTTP to
+   the Next.js development server.
+4. Sign in to GitHub in the same non-private browser session if prompted. A
+   private forwarded port depends on GitHub's authentication cookie.
+
+If iOS offers to download the extensionless port URL, cancel the download,
+close the embedded preview, copy the forwarded address from the Ports panel,
+and paste it into a new normal Safari tab. Temporarily disable a content blocker
+for `github.com` / `app.github.dev` if it prevents the authentication redirect.
+Do not make this app's port public as a workaround: the development app can
+write tournament reservations.
+
+Changes to `.devcontainer/devcontainer.json` apply to new codespaces. For an
+existing codespace, run **Codespaces: Rebuild Container** from the command
+palette before retesting.
 
 `scripts/mock-apps-script.mjs` is a local mock of the Apps Script backend used
 for integration testing:
