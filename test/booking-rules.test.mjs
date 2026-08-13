@@ -379,7 +379,7 @@ test('multi-player bookings validate every player', () => {
   })
   assert.equal(group.ok, false)
   assert.equal(group.isSessionLimitError, true)
-  assert.match(group.error, /A would have 3 practice sessions/)
+  assert.match(group.error, /A already has 2 of 2 practice sessions/)
 
   // B alone is fine (0 + 1 session).
   const solo = book({

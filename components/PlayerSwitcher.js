@@ -35,6 +35,8 @@ export default function PlayerSwitcher({
   className = '',
   inputClassName = '',
   dropdownAlign = 'right',
+  sessionsLabel = null,
+  onOpenReservations = null,
 }) {
   const styles = APPEARANCE[appearance] || APPEARANCE.navbar
   const [query, setQuery] = useState(() => formatPlayerName(currentPlayer))
@@ -105,7 +107,7 @@ export default function PlayerSwitcher({
             }
           }}
           placeholder="Search player…"
-          className={`w-32 rounded-full border px-2.5 py-1 text-xs focus:outline-none sm:w-40 ${styles.input} ${inputClassName}`}
+          className={`w-28 rounded-full border px-2.5 py-1 text-xs focus:outline-none sm:w-36 ${styles.input} ${inputClassName}`}
         />
         {open && (
           <div
@@ -140,6 +142,34 @@ export default function PlayerSwitcher({
           </div>
         )}
       </div>
+      {sessionsLabel ? (
+        <span
+          className={`whitespace-nowrap border-l pl-2 text-[11px] font-semibold ${appearance === 'light' ? 'border-slate-200 text-slate-600' : 'border-white/25 text-white/90'}`}
+          title="Practice sessions used by this player on the selected day (max 2)"
+        >
+          {sessionsLabel}
+        </span>
+      ) : null}
+      {typeof onOpenReservations === 'function' ? (
+        <button
+          type="button"
+          onClick={onOpenReservations}
+          title="Search past, current and upcoming player reservations"
+          className={`inline-flex items-center gap-1 whitespace-nowrap rounded-full border px-2 py-0.5 text-[11px] font-semibold transition ${
+            appearance === 'light'
+              ? 'border-slate-200 bg-white text-slate-700 hover:bg-slate-100'
+              : 'border-white/25 bg-white/15 text-white hover:bg-white/25'
+          }`}
+        >
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <rect x="3" y="4" width="18" height="18" rx="2" />
+            <line x1="16" y1="2" x2="16" y2="6" />
+            <line x1="8" y1="2" x2="8" y2="6" />
+            <line x1="3" y1="10" x2="21" y2="10" />
+          </svg>
+          Reservations
+        </button>
+      ) : null}
     </div>
   )
 }

@@ -5,6 +5,7 @@ import CourtSchedule from '../components/CourtSchedule'
 import GroupBookingModal from '../components/GroupBookingModal'
 import PlayerSwitcher from '../components/PlayerSwitcher'
 import PlayerReservationsModal from '../components/PlayerReservationsModal'
+import DayCarousel from '../components/DayCarousel'
 import {
   laNow,
   laDayOffset,
@@ -204,6 +205,7 @@ export default function Home() {
   const [showFindCourt, setShowFindCourt] = useState(false)
   const [showPlayerReservations, setShowPlayerReservations] = useState(false)
   const [findLocation, setFindLocation] = useState('')
+  const [findDay, setFindDay] = useState('')
   const [findDuration, setFindDuration] = useState(30)
   const [findTime, setFindTime] = useState('')
   const [findNotice, setFindNotice] = useState(null)
@@ -348,6 +350,17 @@ export default function Home() {
     return set
   }, [selectedDay])
 
+  const findCompletedSlots = useMemo(() => {
+    const set = new Set()
+    if (!findDay) return set
+    THIRTY_MIN_SLOTS.forEach((label) => {
+      if (isSlotCompleted(findDay, label)) set.add(label)
+    })
+    return set
+  }, [findDay])
+
+  const bookableDays = useMemo(() => days.filter((d) => d.bookable), [days])
+
   // Courts for the selected day + location, discovered from the sheet's court
   // header rows (empty courts included). Falls back to the known venue lists.
   const courts = useMemo(() => {
@@ -403,9 +416,9 @@ export default function Home() {
   // Recomputed on every render of the modal, so results stay accurate even
   // right after a booking is made from inside Find a Court.
   const findCourts = useMemo(() => {
-    if (!showFindCourt || !findLocation || !selectedDay || !findSlots.length) return []
-    return findCourtsForBooking(courtsByDate[selectedDay]?.[findLocation] || [], reservations, findLocation, selectedDay, findSlots, currentPlayer)
-  }, [showFindCourt, findLocation, selectedDay, findSlots, reservations, currentPlayer, courtsByDate])
+    if (!showFindCourt || !findLocation || !findDay || !findSlots.length) return []
+    return findCourtsForBooking(courtsByDate[findDay]?.[findLocation] || [], reservations, findLocation, findDay, findSlots, currentPlayer)
+  }, [showFindCourt, findLocation, findDay, findSlots, reservations, currentPlayer, courtsByDate])
 
   function handleSelectCourt(id) {
     setSelectedCourt(id)
@@ -568,10 +581,14 @@ export default function Home() {
   }
 
   function openFindCourt() {
-    if (viewOnlyDate) {
-      alert('This day is view only — bookings and cancellations are only available for today and tomorrow.')
+    const preferred = selectedDay && isBookableDay(selectedDay)
+      ? selectedDay
+      : (bookableDays[0]?.key || '')
+    if (!preferred) {
+      alert('Bookings are only available for today and tomorrow.')
       return
     }
+    setFindDay(preferred)
     setFindLocation(selectedLocation || activeLocations[0])
     setFindDuration(30) // Barnes is 30-minute only; other sites can extend to 60 in step 3
     setFindTime('')
@@ -583,8 +600,11 @@ export default function Home() {
   // (or the cancellation dialog when the current player already has a booking
   // in the window).
   function handleFindCourtPick(courtId) {
-    if (viewOnlyDate) return
-    const players = findSlots.flatMap((slot) => reservations[`${findLocation}|${selectedDay}|${courtId}`]?.[slot] || [])
+    if (!findDay || !isBookableDay(findDay)) {
+      alert('Bookings are only available for today and tomorrow.')
+      return
+    }
+    const players = findSlots.flatMap((slot) => reservations[`${findLocation}|${findDay}|${courtId}`]?.[slot] || [])
     const mine = players.includes(currentPlayer)
     if (mine) {
       const group = [...new Set(players)]
@@ -592,12 +612,12 @@ export default function Home() {
         origin: 'find',
         mode: 'cancel',
         location: findLocation,
-        date: selectedDay,
+        date: findDay,
         courtId,
         slots: findSlots,
         players: group,
         title: `Cancel Court ${courtId}`,
-        subtitle: `${findLocation} · ${formatDateLong(dateKeyToLocalDate(selectedDay))}`,
+        subtitle: `${findLocation} · ${formatDateLong(dateKeyToLocalDate(findDay))}`,
       })
       return
     }
@@ -608,7 +628,7 @@ export default function Home() {
     const validation = validateBooking({
       action: 'book',
       location: findLocation,
-      date: selectedDay,
+      date: findDay,
       courtId,
       slots: findSlots,
       names: [currentPlayer],
@@ -624,12 +644,12 @@ export default function Home() {
       origin: 'find',
       mode: 'book',
       location: findLocation,
-      date: selectedDay,
+      date: findDay,
       courtId,
       slots: findSlots,
       players: [currentPlayer],
       title: `Book Court ${courtId}`,
-      subtitle: `${findLocation} · ${formatDateLong(dateKeyToLocalDate(selectedDay))}`,
+      subtitle: `${findLocation} · ${formatDateLong(dateKeyToLocalDate(findDay))}`,
     })
   }
 
@@ -644,7 +664,10 @@ export default function Home() {
 
   // Called by the CourtSchedule modal when a slot is tapped.
   function handleOpenBooking({ mode, slots, players }) {
-    if (viewOnlyDate) return
+    if (viewOnlyDate) {
+      alert('This day is view only — bookings and cancellations are only available for today and tomorrow.')
+      return
+    }
     const dateObj = dateKeyToLocalDate(selectedDay)
     const validation = validateBooking({
       action: mode,
@@ -724,33 +747,14 @@ export default function Home() {
             >
               Find a Court
             </button>
-            <div
-              className="hidden md:inline-flex items-center gap-1.5 rounded-full bg-white/10 border border-white/15 px-3 py-1.5 text-xs font-medium text-white"
-              title="Practice sessions used by this player today (max 2)"
-            >
-              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
-              {Math.min(mySessionsToday.length, MAX_SESSIONS_PER_DAY)}/{MAX_SESSIONS_PER_DAY} sessions today
-            </div>
             <PlayerSwitcher
               currentPlayer={currentPlayer}
               roster={roster}
               onSelect={setCurrentPlayer}
               appearance="navbar"
+              sessionsLabel={`${Math.min(mySessionsToday.length, MAX_SESSIONS_PER_DAY)}/${MAX_SESSIONS_PER_DAY} sessions`}
+              onOpenReservations={() => setShowPlayerReservations(true)}
             />
-            <button
-              type="button"
-              onClick={() => setShowPlayerReservations(true)}
-              className="inline-flex items-center gap-1.5 rounded-full border border-white/20 bg-white/15 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-white/25"
-              title="Search past, current and upcoming player reservations"
-            >
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <rect x="3" y="4" width="18" height="18" rx="2" />
-                <line x1="16" y1="2" x2="16" y2="6" />
-                <line x1="8" y1="2" x2="8" y2="6" />
-                <line x1="3" y1="10" x2="21" y2="10" />
-              </svg>
-              Player&apos;s reservations
-            </button>
           </div>
         </nav>
 
@@ -795,31 +799,11 @@ export default function Home() {
               <h2 className="text-sm font-semibold text-slate-500 uppercase tracking-wider">Select Day</h2>
               <div className="h-px flex-1 max-w-[8rem] bg-slate-200" />
             </div>
-            <div className="flex gap-2 overflow-x-auto pb-2 px-1 -mx-1 scrollbar-thin justify-center">
-              {days.map((d) => {
-                const isActive = selectedDay === d.key
-                return (
-                  <button
-                    key={d.key}
-                    onClick={() => { setSelectedDay(d.key); setSelectedCourt(null) }}
-                    className={`relative flex flex-col items-center min-w-[4rem] px-3 py-2 rounded-xl border-2 transition-all duration-200 shrink-0 ${
-                      isActive
-                        ? 'bg-[#1f5f99] border-[#1f5f99] text-white shadow-lg shadow-blue-900/20'
-                        : 'bg-white border-slate-200 text-slate-700 hover:border-slate-300 hover:shadow-md'
-                    }`}
-                  >
-                    <span className={`text-xs font-medium ${isActive ? 'text-blue-200' : 'text-slate-400'}`}>{d.dayName}</span>
-                    <span className="text-lg font-bold leading-tight">{d.dayNum}</span>
-                    {d.isToday && (
-                      <span className={`text-[10px] font-semibold mt-0.5 px-1.5 py-0.5 rounded-full ${isActive ? 'bg-emerald-400/30 text-emerald-200' : 'bg-emerald-100 text-emerald-700'}`}>Today</span>
-                    )}
-                    {!d.bookable && (
-                      <span className={`text-[9px] font-semibold uppercase tracking-wide mt-0.5 px-1.5 py-0.5 rounded-full ${isActive ? 'bg-amber-300/25 text-amber-100' : 'bg-amber-100 text-amber-700'}`}>View only</span>
-                    )}
-                  </button>
-                )
-              })}
-            </div>
+            <DayCarousel
+              days={days}
+              selectedDay={selectedDay}
+              onSelect={(key) => { setSelectedDay(key); setSelectedCourt(null) }}
+            />
           </div>
         )}
 
@@ -1011,27 +995,26 @@ export default function Home() {
                   }}
                   appearance="header"
                   dropdownAlign="left"
+                  sessionsLabel={`${Math.min(existingPlayerSessions(reservations, { dateKey: findDay, name: currentPlayer, practiceLocations: activeLocations }).length, MAX_SESSIONS_PER_DAY)}/${MAX_SESSIONS_PER_DAY} sessions`}
+                  onOpenReservations={() => setShowPlayerReservations(true)}
                 />
-                <div className="inline-flex items-center gap-1.5 rounded-full bg-white/10 px-3 py-1.5 text-xs font-medium text-white">
-                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <rect x="3" y="4" width="18" height="18" rx="2" ry="2" />
-                    <line x1="16" y1="2" x2="16" y2="6" />
-                    <line x1="8" y1="2" x2="8" y2="6" />
-                    <line x1="3" y1="10" x2="21" y2="10" />
-                  </svg>
-                  {formatDateLong(dateKeyToLocalDate(selectedDay))}
-                </div>
-                <button
-                  type="button"
-                  onClick={() => setShowPlayerReservations(true)}
-                  className="rounded-full border border-white/20 bg-white/10 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-white/20"
-                >
-                  View reservations
-                </button>
               </div>
             </div>
 
             <div className="p-4 max-h-[60vh] overflow-auto space-y-4">
+              <div>
+                <div className="text-xs font-semibold uppercase tracking-wider text-slate-500 mb-2">Day</div>
+                <DayCarousel
+                  days={bookableDays}
+                  selectedDay={findDay}
+                  onSelect={(key) => {
+                    setFindDay(key)
+                    setFindTime('')
+                    setFindNotice(null)
+                  }}
+                />
+                <p className="mt-2 text-center text-[11px] text-slate-400">Only today and tomorrow can be booked.</p>
+              </div>
               {/* Step 1 — Location (practice sites + any added sites) */}
               <div>
                 <div className="text-xs font-semibold uppercase tracking-wider text-slate-500 mb-2">1. Location</div>
@@ -1062,7 +1045,7 @@ export default function Home() {
                 <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
                   {THIRTY_MIN_SLOTS.map((slot) => {
                     const isActive = findTime === slot
-                    const completed = completedSlots.has(slot)
+                    const completed = findCompletedSlots.has(slot)
                     return (
                       <button
                         key={slot}
@@ -1108,13 +1091,13 @@ export default function Home() {
                     <button
                       type="button"
                       onClick={() => { if (findTime && timeLabelToMinutes(findTime.split('–')[0]) <= 17 * 60 + 30) { setFindDuration(60); setFindNotice(null) } }}
-                      disabled={!findTime || timeLabelToMinutes(findTime.split('–')[0]) > 17 * 60 + 30 || completedSlots.has(findSlots[1])}
+                      disabled={!findTime || timeLabelToMinutes(findTime.split('–')[0]) > 17 * 60 + 30 || findCompletedSlots.has(findSlots[1])}
                       title={
                         !findTime
                           ? 'Pick a start time first'
                           : timeLabelToMinutes(findTime.split('–')[0]) > 17 * 60 + 30
                             ? 'A 1-hour booking must start by 5:30 PM'
-                            : completedSlots.has(findSlots[1])
+                            : findCompletedSlots.has(findSlots[1])
                               ? 'The second half of this hour has already ended'
                               : '1 hour'
                       }
@@ -1142,7 +1125,7 @@ export default function Home() {
                 {findSlots.length > 0 && (
                   <p className="mb-2 text-sm text-slate-600">
                     Looking for <span className="font-semibold text-slate-800">{findSlots[0].split('–')[0]} to {findSlots[findSlots.length - 1].split('–')[1]}</span>
-                    {findSlots.length === 2 ? ' (1 hour)' : ' (30 minutes)'} at {findLocation || 'a venue'} on {selectedDay ? formatDateLong(dateKeyToLocalDate(selectedDay)) : 'the selected day'}.
+                    {findSlots.length === 2 ? ' (1 hour)' : ' (30 minutes)'} at {findLocation || 'a venue'} on {findDay ? formatDateLong(dateKeyToLocalDate(findDay)) : 'the selected day'}.
                   </p>
                 )}
                 {findNotice && (
@@ -1166,7 +1149,7 @@ export default function Home() {
                       // Pending keys are "mode|location|date|court|slots|names"
                       // (see handleGroupWrite); the names part varies once
                       // extra players join a booking, so match by prefix.
-                      const pendingPrefix = `${r.location}|${selectedDay}|${r.courtId}|${findSlots.join(',')}|`
+                      const pendingPrefix = `${r.location}|${findDay}|${r.courtId}|${findSlots.join(',')}|`
                       const isSaving = Object.keys(pendingReservations).some(
                         (k) => k.startsWith(`book|${pendingPrefix}`) || k.startsWith(`cancel|${pendingPrefix}`)
                       )
@@ -1191,7 +1174,7 @@ export default function Home() {
                           </button>
                           <button
                             type="button"
-                            onClick={() => openCourtSchedule(r.location, selectedDay, r.courtId)}
+                            onClick={() => openCourtSchedule(r.location, findDay, r.courtId)}
                             className="shrink-0 rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-medium text-[#1f5f99] hover:border-[#1f5f99]/40 hover:bg-blue-50 transition"
                           >
                             View
@@ -1224,6 +1207,7 @@ export default function Home() {
           reservations={reservations}
           roster={roster}
           currentPlayer={currentPlayer}
+          onSelectPlayer={setCurrentPlayer}
           pendingReservations={pendingReservations}
           practiceLocations={activeLocations}
           viewOnly={viewOnlyDate}
