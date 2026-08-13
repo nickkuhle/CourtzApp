@@ -2,12 +2,17 @@
 // SHEET_ID: 1U3TcsbIhQ9lxeo0_LtHYTldIqbkWg2Je  (TEST COPY - do not point at the real sheet)
 // Bump SCRIPT_VERSION on every edit so the app (and you) can verify which
 // deployment is actually live via WEBAPP_URL?action=ping.
-// 2.1.1: the 2-session-per-day limit now compares LOCATION as well as court
-// and start time, so a same-numbered court at another venue can no longer be
-// used to dodge the maximum.
-const SCRIPT_VERSION = "2.1.1";
+// 2.2: past/ended reservations remain in schedule reads, legacy toggle-adds
+// enforce every booking rule, and staff approval can be protected by a code.
+const SCRIPT_VERSION = "2.2";
 const SHEET_ID = "1U3TcsbIhQ9lxeo0_LtHYTldIqbkWg2Je";
 const DEFAULT_TOURNAMENT_YEAR = "2026";
+// Prefer setting STAFF_APPROVAL_CODE as an Apps Script script property
+// (Project Settings -> Script properties). This constant is an optional
+// fallback for deployments that cannot use script properties. Leave both
+// empty to preserve the previous unprotected staff-approval behavior.
+const STAFF_APPROVAL_CODE = "";
+const STAFF_APPROVAL_WARNING_PROPERTY = "STAFF_APPROVAL_UNPROTECTED_WARNING_LOGGED";
 const LOCATION_MAP = {
   "Barnes TC": "Barnes Tennis Center",
   "Peninsula Tennis Club": "Peninsula Tennis Club",
@@ -94,13 +99,23 @@ function doPost(e) {
         return jsonResponse({ success: true, version: SCRIPT_VERSION, action: "cancelGroup" });
       }
       if (data.action === "toggleReservation") {
-        // Single-player toggle kept for older app builds. A toggle can be
-        // either a booking or a cancellation, so only the booking-window rules
-        // (date + ended slots) are applied.
-        // data: {location, date, courtId, slot, name, staffApproved?, practiceLocations?}
-        validateBookingForWrite(ss, "cancel", data, [data.slot], [data.name]);
+        // Single-player toggle kept for older app builds. Inspect the locked,
+        // current grid first: removing an existing name validates as cancel;
+        // adding a name validates as book and must pass every booking rule.
+        // data: {location, date, courtId, slot, name, staffApproved?, staffCode?, practiceLocations?}
+        const sheetName = locationToSheet(data.location);
+        const sh = ss.getSheetByName(sheetName);
+        if (!sh) throw new Error("Sheet not found: " + sheetName);
+        const values = sh.getDataRange().getValues();
+        const startNorm = normalizeTime(slotStartLabel(String(data.slot)));
+        const found = locateSlotCells(values, String(data.date), data.courtId, startNorm);
+        if (!found) throw new Error("Time slot not found: " + data.slot + " on " + sheetName + " " + data.date);
+        const toggleName = String(data.name || "").trim();
+        const isRemoval = found.cells.some(c => c.value === toggleName);
+        const toggleAction = isRemoval ? "cancel" : "book";
+        validateBookingForWrite(ss, toggleAction, data, [data.slot], [data.name]);
         toggleGridReservation(ss, data);
-        return jsonResponse({ success: true, version: SCRIPT_VERSION, action: "toggleReservation" });
+        return jsonResponse({ success: true, version: SCRIPT_VERSION, action: "toggleReservation", toggleAction: toggleAction });
       }
     } finally {
       lock.releaseLock();
@@ -108,7 +123,13 @@ function doPost(e) {
     return jsonResponse({ success: false, version: SCRIPT_VERSION, error: "Unknown POST action" });
   } catch (err) {
     if (err && err.isRulesError) {
-      return jsonResponse({ success: false, version: SCRIPT_VERSION, error: err.message, code: err.code });
+      return jsonResponse({
+        success: false,
+        version: SCRIPT_VERSION,
+        error: err.message,
+        code: err.code,
+        staffCodeRequired: Boolean(err.staffCodeRequired)
+      });
     }
     return jsonResponse({ success: false, version: SCRIPT_VERSION, error: err.toString(), stack: err.stack });
   }
@@ -119,6 +140,7 @@ function doPost(e) {
 // bypass them. Mirrors validateBooking in lib/booking-rules.js.
 function validateBookingForWrite(ss, action, data, slots, names) {
   const reservations = getAllReservations(ss);
+  const staffApproved = action === "book" ? authorizeStaffApprovalGS(data) : false;
   const validation = validateBookingGS({
     action: action,
     location: data.location,
@@ -126,19 +148,62 @@ function validateBookingForWrite(ss, action, data, slots, names) {
     courtId: data.courtId,
     slots: slots,
     names: names,
-    staffApproved: Boolean(data.staffApproved),
+    staffApproved: staffApproved,
     reservations: reservations,
     practiceLocations: data.practiceLocations
   });
   if (!validation.ok) {
     throw rulesError(validation.error, validation.isSessionLimitError ? "SESSION_LIMIT" : "BOOKING_RULES");
   }
-  if (validation.warnings.length && !data.staffApproved) {
-    throw rulesError(
+  if (validation.warnings.length && !staffApproved) {
+    const codeRequired = Boolean(configuredStaffApprovalCodeGS());
+    if (!codeRequired) warnAboutUnprotectedStaffApprovalGS();
+    const err = rulesError(
       "This booking is within one hour of another practice session. Tournament staff approval is required to continue.",
       "STAFF_APPROVAL_REQUIRED"
     );
+    err.staffCodeRequired = codeRequired;
+    throw err;
   }
+}
+
+function configuredStaffApprovalCodeGS() {
+  const props = PropertiesService.getScriptProperties();
+  const propertyCode = String(props.getProperty("STAFF_APPROVAL_CODE") || "").trim();
+  const code = propertyCode || String(STAFF_APPROVAL_CODE || "").trim();
+  if (code && props.getProperty(STAFF_APPROVAL_WARNING_PROPERTY)) {
+    props.deleteProperty(STAFF_APPROVAL_WARNING_PROPERTY);
+  }
+  return code;
+}
+
+function warnAboutUnprotectedStaffApprovalGS() {
+  const props = PropertiesService.getScriptProperties();
+  if (props.getProperty(STAFF_APPROVAL_WARNING_PROPERTY) === "1") return;
+  console.warn("STAFF_APPROVAL_CODE is not set; staffApproved requests are not protected by a staff code.");
+  props.setProperty(STAFF_APPROVAL_WARNING_PROPERTY, "1");
+}
+
+// A raw `staffApproved: true` is only honored when it includes the configured
+// code. If no code is configured, retain the pre-code behavior and warn once.
+function authorizeStaffApprovalGS(data) {
+  if (!data.staffApproved) return false;
+  const configuredCode = configuredStaffApprovalCodeGS();
+  if (!configuredCode) {
+    warnAboutUnprotectedStaffApprovalGS();
+    return true;
+  }
+  if (!String(data.staffCode || "").trim()) {
+    const missing = rulesError("A tournament staff approval code is required.", "STAFF_APPROVAL_CODE_REQUIRED");
+    missing.staffCodeRequired = true;
+    throw missing;
+  }
+  if (String(data.staffCode).trim() !== configuredCode) {
+    const invalid = rulesError("The tournament staff approval code is incorrect.", "STAFF_APPROVAL_CODE_INVALID");
+    invalid.staffCodeRequired = true;
+    throw invalid;
+  }
+  return true;
 }
 
 function rulesError(message, code) {
@@ -194,17 +259,12 @@ function readFullSchedule(ss) {
   const roster = getRosterData(ss).map(r => r.Name || r.name).filter(Boolean);
   const days = Object.keys(datesSet).sort();
 
-  // v2.1: 30-minute slots whose end time has already passed (America/Los_Angeles)
-  // are view-only, so they are no longer exposed as bookable/cancellable.
-  for (const k in all) {
-    const dateKey = String(k).split("|")[1];
-    for (const slot in all[k]) {
-      if (isSlotCompleted(dateKey, slot)) delete all[k][slot];
-    }
-    if (!Object.keys(all[k]).length) delete all[k];
-  }
+  // v2.2: keep every reservation, including past days and today's completed
+  // slots. The client marks them Ended/view-only, while write validation below
+  // still prevents them from being changed. Session metadata is therefore
+  // computed from this same complete reservation set.
 
-  // v2.1: per-player practice-session metadata for the three default practice
+  // Per-player practice-session metadata for the three default practice
   // locations, so the UI can show how many sessions a player has used on each
   // day. Hidden match-play sites are deliberately NOT included.
   const practiceSessions = {};

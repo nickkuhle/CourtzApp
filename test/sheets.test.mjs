@@ -166,6 +166,7 @@ test('books a whole group atomically via bookGroup', async () => {
     slots: ['8:00 AM–8:30 AM', '8:30 AM–9:00 AM'],
     names: ['Abbey, Stephanie', 'Chen, Alice'],
     staffApproved: false,
+    staffCode: null,
     practiceLocations: null,
   })
 })
@@ -226,6 +227,7 @@ test('writes a single reservation to Apps Script (legacy toggle)', async () => {
     slot: '8:00 AM–8:30 AM',
     name: 'Abbey, Stephanie',
     staffApproved: false,
+    staffCode: null,
     practiceLocations: null,
   })
 })

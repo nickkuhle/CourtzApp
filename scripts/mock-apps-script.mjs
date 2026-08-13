@@ -1,4 +1,4 @@
-// Local mock of the v2.1 Apps Script web app for integration testing.
+// Local mock of the v2.2 Apps Script web app for integration testing.
 // The grid mirrors the real test sheet's layout but its dates are generated
 // relative to "today" (America/Los_Angeles) so integration tests stay
 // deterministic: two past days, today, tomorrow (bookable) and the day after
@@ -8,21 +8,22 @@
 //   PLNU       - courts 1..6
 //   Pacific Beach TC / Balboa / USD - one seed reservation on the view-only
 //   day (names in the SECOND column of the court's span, as in the real sheet)
-// The mock applies the v2.1 booking rules (booking window + session limits +
-// staff-approval warnings) under a serialised write queue that stands in for
+// The mock applies the v2.2 booking rules (booking window + session limits +
+// protected staff approvals) under a serialised write queue that stands in for
 // the Apps Script document lock.
 
 import http from 'node:http'
 import {
   validateBooking,
   existingPlayerSessions,
-  isSlotCompleted,
   laNow,
   addDaysToDateKey,
 } from '../lib/booking-rules.js'
 import { DEFAULT_PRACTICE_LOCATIONS } from '../lib/locations.js'
 
-const SCRIPT_VERSION = '2.1.1'
+const SCRIPT_VERSION = '2.2'
+const STAFF_APPROVAL_CODE = String(process.env.STAFF_APPROVAL_CODE || '').trim()
+let warnedAboutUnprotectedStaffApproval = false
 
 const LOCATION_MAP = {
   'Barnes TC': 'Barnes Tennis Center',
@@ -78,12 +79,53 @@ function emptyGrid(ncourts, baseCourt = 1) {
   return grid
 }
 
-// Seed reservations on the view-only day (like the real sheet's Wednesday
-// reservations that the old parser used to drop).
-const seedNames = {
-  'Pacific Beach Tennis Club': { court: 1, names: ['Waters, Eadan', 'Chen, Alice'] },
-  'Balboa Tennis Center': { court: 3, names: ['Reeves, Sam', 'Zhou, Zhongyi'] },
-  'USD': { court: 2, names: ['Andreoli, Mia', 'Shi, Kelly'] },
+// Seed view-only future reservations plus reservations on a past day and in a
+// completed slot today. v2.2 schedule reads must preserve all of them.
+const seedReservations = {
+  'Peninsula Tennis Club': [
+    { dayIndex: 0, court: 1, start: 480, names: ['Waters, Eadan'] },
+  ],
+  'Point Loma Nazarene College': [
+    { dayIndex: 2, court: 1, start: 480, names: ['Reeves, Sam'] },
+  ],
+  'Pacific Beach Tennis Club': [
+    { dayIndex: 4, court: 1, start: 510, names: ['Waters, Eadan', 'Chen, Alice'] },
+  ],
+  'Balboa Tennis Center': [
+    { dayIndex: 4, court: 3, start: 510, names: ['Reeves, Sam', 'Zhou, Zhongyi'] },
+  ],
+  'USD': [
+    { dayIndex: 4, court: 2, start: 510, names: ['Andreoli, Mia', 'Shi, Kelly'] },
+  ],
+}
+
+function writeSeedReservation(grid, seed) {
+  const wantedDate = dateLabel(DAY_KEYS[seed.dayIndex])
+  const wantedTime = timeLabel(seed.start)
+  const dateRow = grid.findIndex(row => String(row[0] || '').trim() === wantedDate)
+  if (dateRow === -1) throw new Error(`Seed date not found: ${wantedDate}`)
+  const header = grid[dateRow + 1]
+  const courtCol = header.findIndex((value, index) => index > 0 && String(value) === String(seed.court))
+  if (courtCol === -1) throw new Error(`Seed court not found: ${seed.court}`)
+  let nextCourtCol = header.length
+  for (let col = courtCol + 1; col < header.length; col++) {
+    if (/^\d{1,2}$/.test(String(header[col] || '').trim())) { nextCourtCol = col; break }
+  }
+  const courtCols = Array.from({ length: nextCourtCol - courtCol }, (_, index) => courtCol + index)
+  let timeRow = -1
+  for (let row = dateRow + 2; row < grid.length; row++) {
+    if (/^(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s/i.test(String(grid[row][0] || '').trim())) break
+    if (String(grid[row][0] || '').trim() === wantedTime) { timeRow = row; break }
+  }
+  if (timeRow === -1) throw new Error(`Seed time not found: ${wantedTime}`)
+  const cells = []
+  for (const row of [timeRow, timeRow + 1]) {
+    for (const col of [...courtCols].reverse()) cells.push({ row, col })
+  }
+  if (cells.length < seed.names.length) throw new Error(`Not enough cells for seed on Court ${seed.court}`)
+  seed.names.forEach((name, index) => {
+    grid[cells[index].row][cells[index].col] = name
+  })
 }
 
 const grids = {}
@@ -91,22 +133,7 @@ for (const tab of tabs) {
   const ncourts = tab === 'Barnes TC' ? 3 : tab === 'Peninsula Tennis Club' ? 12 : 6
   // Barnes courts are numbered 4..6 in the real sheet.
   const grid = emptyGrid(ncourts, tab === 'Barnes TC' ? 4 : 1)
-  const seed = seedNames[LOCATION_MAP[tab]]
-  if (seed) {
-    const viewOnlyLabel = dateLabel(DAY_KEYS[4])
-    for (let r = 0; r < grid.length; r++) {
-      if (String(grid[r][0]).includes(viewOnlyLabel)) {
-        for (let rr = r + 1; rr < grid.length; rr++) {
-          if (String(grid[rr][0]).includes('8:30 AM')) {
-            grid[rr][(seed.court - 1) * 2 + 2] = seed.names[0]
-            grid[rr + 1][(seed.court - 1) * 2 + 2] = seed.names[1]
-            break
-          }
-        }
-        break
-      }
-    }
-  }
+  for (const seed of seedReservations[LOCATION_MAP[tab]] || []) writeSeedReservation(grid, seed)
   grids[tab] = grid
 }
 
@@ -258,6 +285,66 @@ function currentReservations() {
   return all
 }
 
+function warnAboutUnprotectedStaffApprovalOnce() {
+  if (warnedAboutUnprotectedStaffApproval) return
+  warnedAboutUnprotectedStaffApproval = true
+  console.warn('STAFF_APPROVAL_CODE is not set; staffApproved requests are not protected by a staff code.')
+}
+
+function authorizeStaffApproval(data) {
+  if (!data.staffApproved) return false
+  if (!STAFF_APPROVAL_CODE) {
+    warnAboutUnprotectedStaffApprovalOnce()
+    return true
+  }
+  if (!String(data.staffCode || '').trim()) {
+    const error = new Error('A tournament staff approval code is required.')
+    error.code = 'STAFF_APPROVAL_CODE_REQUIRED'
+    error.status = 403
+    error.staffCodeRequired = true
+    throw error
+  }
+  if (String(data.staffCode).trim() !== STAFF_APPROVAL_CODE) {
+    const error = new Error('The tournament staff approval code is incorrect.')
+    error.code = 'STAFF_APPROVAL_CODE_INVALID'
+    error.status = 403
+    error.staffCodeRequired = true
+    throw error
+  }
+  return true
+}
+
+function validateWrite(data, action, slots, names) {
+  const staffApproved = action === 'book' ? authorizeStaffApproval(data) : false
+  const validation = validateBooking({
+    action,
+    location: data.location,
+    date: data.date,
+    courtId: data.courtId,
+    slots,
+    names,
+    staffApproved,
+    reservations: currentReservations(),
+    practiceLocations: data.practiceLocations,
+  })
+  if (!validation.ok) {
+    const error = new Error(validation.error)
+    error.code = validation.isSessionLimitError ? 'SESSION_LIMIT' : 'BOOKING_RULES'
+    error.status = 409
+    throw error
+  }
+  if (action === 'book' && validation.warnings.length && !staffApproved) {
+    if (!STAFF_APPROVAL_CODE) warnAboutUnprotectedStaffApprovalOnce()
+    const error = new Error('This booking is within one hour of another practice session. Tournament staff approval is required to continue.')
+    error.code = 'STAFF_APPROVAL_REQUIRED'
+    error.status = 409
+    error.staffCodeRequired = Boolean(STAFF_APPROVAL_CODE)
+    error.warnings = validation.warnings
+    throw error
+  }
+  return validation
+}
+
 // Serialised writes (stands in for the Apps Script document lock).
 let writeQueue = Promise.resolve()
 
@@ -282,9 +369,8 @@ const server = http.createServer((req, res) => {
         if (!courtsByDate[d][LOCATION_MAP[tab]]) courtsByDate[d][LOCATION_MAP[tab]] = locMap[LOCATION_MAP[tab]]
       }
     }
-    // v2.1: ended 30-minute slots are no longer exposed (they are not
-    // bookable or cancellable), and practice-session metadata is reported so
-    // the UI can show how many sessions each player has used per day.
+    // v2.2 keeps past and ended reservations in `all`. They remain view-only
+    // through the mirrored write rules, and still count in session metadata.
     const practiceSessions = {}
     days.forEach(d => {
       practiceSessions[d] = {}
@@ -294,13 +380,6 @@ const server = http.createServer((req, res) => {
           .map(s => ({ player: s.player, court: s.court, start: s.start, slots: s.slots }))
       })
     })
-    for (const [key, slots] of Object.entries(all)) {
-      const [, date] = key.split('|')
-      for (const [slot] of Object.entries(slots)) {
-        if (isSlotCompleted(date, slot)) delete slots[slot]
-      }
-      if (!Object.keys(slots).length) delete all[key]
-    }
     return send({ success: true, version: SCRIPT_VERSION, data: {
       roster: ['Abbey, Stephanie', 'Chen, Alice', 'Waters, Eadan', 'Reeves, Sam', 'Zhou, Zhongyi', 'Andreoli, Mia', 'Shi, Kelly'],
       reservations: all,
@@ -336,29 +415,8 @@ const server = http.createServer((req, res) => {
           if (data.action === 'bookGroup' || data.action === 'cancelGroup') {
             const names = [...new Set((data.names || []).map(n => String(n).trim()).filter(Boolean))]
             const slots = [...new Set((data.slots || []).map(s => String(s).trim()).filter(Boolean))]
-            const validation = validateBooking({
-              action: data.action === 'bookGroup' ? 'book' : 'cancel',
-              location: data.location,
-              date: data.date,
-              courtId: data.courtId,
-              slots,
-              names,
-              staffApproved: Boolean(data.staffApproved),
-              reservations: currentReservations(),
-              practiceLocations: data.practiceLocations,
-            })
-            if (!validation.ok) {
-              return send({ success: false, version: SCRIPT_VERSION, error: validation.error, code: validation.isSessionLimitError ? 'SESSION_LIMIT' : 'BOOKING_RULES' }, 409)
-            }
-            if (data.action === 'bookGroup' && validation.warnings.length && !data.staffApproved) {
-              return send({
-                success: false,
-                version: SCRIPT_VERSION,
-                error: 'This booking is within one hour of another practice session. Tournament staff approval is required to continue.',
-                code: 'STAFF_APPROVAL_REQUIRED',
-                warnings: validation.warnings,
-              }, 409)
-            }
+            const action = data.action === 'bookGroup' ? 'book' : 'cancel'
+            const validation = validateWrite(data, action, slots, names)
 
             if (data.action === 'bookGroup') {
               for (const slot of slots) {
@@ -388,9 +446,38 @@ const server = http.createServer((req, res) => {
             if (!found) return send({ success: false, version: SCRIPT_VERSION, error: 'No booking found to cancel' })
             return send({ success: true, version: SCRIPT_VERSION, action: 'cancelGroup' })
           }
+
+          if (data.action === 'toggleReservation') {
+            const name = String(data.name || '').trim()
+            const slot = String(data.slot || '').trim()
+            const startNorm = normalizeTimeMock(slot.split(/[–-]/)[0].trim())
+            const cells = locateSlotCells(values, data.date, data.courtId, startNorm)
+            if (!cells) return send({ success: false, version: SCRIPT_VERSION, error: 'Time slot not found: ' + slot })
+            const isRemoval = cells.some(cell => cell.value === name)
+            const action = isRemoval ? 'cancel' : 'book'
+            validateWrite(data, action, [slot], [name])
+
+            if (isRemoval) {
+              const cell = cells.find(candidate => candidate.value === name)
+              values[cell.row][cell.col] = ''
+            } else {
+              const cell = cells.find(candidate => !candidate.value)
+              if (!cell) return send({ success: false, version: SCRIPT_VERSION, error: 'Slot full' })
+              values[cell.row][cell.col] = name
+            }
+            return send({ success: true, version: SCRIPT_VERSION, action: 'toggleReservation', toggleAction: action })
+          }
+
           return send({ success: false, version: SCRIPT_VERSION, error: 'Unknown POST action' })
         } catch (e) {
-          return send({ success: false, version: SCRIPT_VERSION, error: e.toString() })
+          return send({
+            success: false,
+            version: SCRIPT_VERSION,
+            error: e.message || String(e),
+            code: e.code || undefined,
+            staffCodeRequired: Boolean(e.staffCodeRequired),
+            warnings: e.warnings || undefined,
+          }, e.status || 500)
         }
       })
     })
