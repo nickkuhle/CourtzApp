@@ -1,7 +1,10 @@
-import React, { useEffect } from 'react'
-import { existingPlayerSessions, MAX_SESSIONS_PER_DAY } from '../lib/booking-rules'
+import React, { useEffect, useMemo } from 'react'
+import { MAX_SESSIONS_PER_DAY } from '../lib/booking-rules'
+import { normalizePracticeLocations } from '../lib/locations'
 import PlayerChip from './PlayerChip'
-import { courtSessionBlocks, formatPlayerName } from '../lib/schedule-display'
+import PlayerSwitcher from './PlayerSwitcher'
+import { EMPTY_RESERVATION_INDEX } from '../lib/reservation-index'
+import { formatPlayerName } from '../lib/schedule-display'
 
 function formatTimeLabel(totalMinutes) {
   const hours = Math.floor(totalMinutes / 60)
@@ -113,11 +116,18 @@ function Slot({ time, reservedBy = [], currentPlayer, onClick, disabled, ended, 
 // group booked in that slot. Days outside today/tomorrow and 30-minute slots
 // that have already ended are view-only: they can be inspected but never
 // booked or canceled.
-export default function CourtSchedule({ court, date, location, reservations, currentPlayer = 'Alice Johnson', pendingReservations = {}, practiceLocations = null, viewOnly = false, completedSlots = null, barnesOnly30 = false, onOpenBooking, onPreviousCourt, onNextCourt, canGoPrevious = false, canGoNext = false, onClose }) {
+export default function CourtSchedule({ court, date, location, reservations, index = EMPTY_RESERVATION_INDEX, roster = [], onSelectPlayer, currentPlayer = 'Alice Johnson', pendingReservations = {}, practiceLocations = null, viewOnly = false, completedSlots = null, barnesOnly30 = false, onOpenBooking, onPreviousCourt, onNextCourt, canGoPrevious = false, canGoNext = false, onClose }) {
   if (!court) return null
 
   useEffect(() => {
     function handleKeyDown(event) {
+      // Never steal keys from the player switcher (or any other field): arrows
+      // must move the caret while typing, and Escape only closes its dropdown.
+      const target = event.target
+      const typing =
+        target &&
+        (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)
+      if (typing || event.defaultPrevented) return
       if (event.key === 'ArrowLeft' && canGoPrevious) onPreviousCourt?.()
       if (event.key === 'ArrowRight' && canGoNext) onNextCourt?.()
       if (event.key === 'Escape') onClose?.()
@@ -130,14 +140,15 @@ export default function CourtSchedule({ court, date, location, reservations, cur
   const key = `${location}|${date}|${court}`
   const reserved = reservations[key] || {}
 
-  // Practice sessions already used by this player today (max 2). Barnes
-  // 30-minute slots count one each; elsewhere two consecutive 30-minute slots
-  // on the same court count as a single session.
-  const sessionsUsed = existingPlayerSessions(reservations, {
-    dateKey: date,
-    name: currentPlayer,
-    practiceLocations,
-  }).length
+  // Practice sessions already used by the SELECTED player today (max 2). Read
+  // straight off the shared index: Barnes 30-minute slots count one each;
+  // elsewhere two consecutive 30-minute slots on the same court count as one
+  // session. Only active practice locations count, exactly like the rules.
+  const activePractice = useMemo(() => new Set(normalizePracticeLocations(practiceLocations)), [practiceLocations])
+  const sessionsUsed = useMemo(
+    () => index.sessionsFor(currentPlayer).filter((s) => s.date === date && activePractice.has(s.location)).length,
+    [index, currentPlayer, date, activePractice]
+  )
 
   const totalSlots = (() => {
     const start = 8 * 60
@@ -148,7 +159,7 @@ export default function CourtSchedule({ court, date, location, reservations, cur
   })()
   const bookedCount = Object.values(reserved).filter((v) => Array.isArray(v) && v.length > 0).length
   const myCount = Object.values(reserved).reduce((acc, v) => acc + (Array.isArray(v) && v.includes(currentPlayer) ? 1 : 0), 0)
-  const sessionBlocks = courtSessionBlocks(reservations, { dateKey: date, location, court })
+  const sessionBlocks = index.blocksFor({ date, location, court })
 
   const slots = []
   const start = 8 * 60 // 8:00
@@ -233,10 +244,19 @@ export default function CourtSchedule({ court, date, location, reservations, cur
         {/* Controls */}
         <div className="px-6 py-4 border-b border-slate-100 shrink-0">
           <div className="flex flex-wrap items-center gap-3">
-            <div className="flex items-center gap-2">
-              <span className="text-sm font-medium text-slate-600">Booking Courts As</span>
-              <span className="rounded-full bg-[#1f5f99]/10 px-3 py-1 text-sm font-semibold text-[#1f5f99]">{formatPlayerName(currentPlayer)}</span>
-            </div>
+            {/* The exact same shared switcher used in the navbar and Find a
+                Court. Selecting here updates the canonical currentPlayer in
+                pages/index.js, so ownership badges, "Your booking", the daily
+                session count and cancellation eligibility all follow instantly
+                without closing the court schedule. */}
+            <PlayerSwitcher
+              currentPlayer={currentPlayer}
+              roster={roster}
+              onSelect={onSelectPlayer}
+              label="Booking Courts As"
+              appearance="light"
+              dropdownAlign="left"
+            />
             <span className="ml-auto rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-500">
               {barnesOnly30 ? '30-minute times — Barnes allows one 30-minute session per reservation' : '30-minute times'}
             </span>

@@ -26,23 +26,39 @@ afterEach(() => {
 
 test('loads reservations, roster, dates and courts from the supplied Apps Script URL', async () => {
   delete process.env.SHEETS_WEBAPP_URL
-  let requestedUrl = ''
+  const requestedUrls = []
+  const bookableReservations = {
+    'Barnes Tennis Center|2001-08-11|4': {
+      '8:00 AM–8:30 AM': ['Abbey, Stephanie'],
+    },
+    'Barnes Tennis Center|2026-08-11|4': {
+      '8:00 AM–8:30 AM': ['Abbey, Stephanie', 'Andreoli, Mia'],
+    },
+  }
   global.fetch = async (url, options) => {
-    requestedUrl = String(url)
+    requestedUrls.push(String(url))
     assert.equal(options.cache, 'no-store')
+    // The unpruned read-only mirror used by the reservation search. It is
+    // fetched alongside getSchedule and must never change the bookable data.
+    if (String(url).includes('action=getAll')) {
+      return jsonResponse({
+        success: true,
+        version: '2.0',
+        roster: ['Abbey, Stephanie'],
+        reservations: {
+          ...bookableReservations,
+          'Barnes Tennis Center|2026-08-10|4': {
+            '8:00 AM–8:30 AM': ['Abbey, Stephanie'],
+          },
+        },
+      })
+    }
     return jsonResponse({
       success: true,
       version: '2.0',
       data: {
         roster: ['Abbey, Stephanie'],
-        reservations: {
-          'Barnes Tennis Center|2001-08-11|4': {
-            '8:00 AM–8:30 AM': ['Abbey, Stephanie'],
-          },
-          'Barnes Tennis Center|2026-08-11|4': {
-            '8:00 AM–8:30 AM': ['Abbey, Stephanie', 'Andreoli, Mia'],
-          },
-        },
+        reservations: bookableReservations,
         days: ['2026-08-10', '2026-08-11', '2026-08-12', '2026-08-15'],
         courtsByDate: {
           '2026-08-10': { 'Barnes Tennis Center': [4, 5] },
@@ -57,8 +73,15 @@ test('loads reservations, roster, dates and courts from the supplied Apps Script
   const { getSchedule } = await loadFreshSheetsModule('read')
   const schedule = await getSchedule()
 
-  assert.match(requestedUrl, /AKfycbzlHIg__YqQdq9ohWvFdu9wCZZ27S5XPTYeBCV3y9IdDx1AZmZjs7vaV3rcZVz2lFaW6g/)
-  assert.match(requestedUrl, /action=getSchedule/)
+  assert.ok(requestedUrls.every((u) => /AKfycbzlHIg__YqQdq9ohWvFdu9wCZZ27S5XPTYeBCV3y9IdDx1AZmZjs7vaV3rcZVz2lFaW6g/.test(u)))
+  assert.ok(requestedUrls.some((u) => /action=getSchedule/.test(u)), 'the bookable payload is read')
+  assert.ok(requestedUrls.some((u) => /action=getAll/.test(u)), 'the read-only history payload is read too')
+  // The history payload only ever adds to `history`, never to `reservations`.
+  assert.equal(schedule.reservations['Barnes Tennis Center|2026-08-10|4'], undefined)
+  assert.deepEqual(
+    schedule.history['Barnes Tennis Center|2026-08-10|4']['8:00 AM–8:30 AM'],
+    ['Abbey, Stephanie'],
+  )
   assert.equal(schedule.connected, true)
   assert.equal(schedule.source, 'webapp')
   assert.equal(schedule.scriptVersion, '2.0')

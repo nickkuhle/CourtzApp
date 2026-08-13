@@ -78,6 +78,16 @@ function emptyGrid(ncourts, baseCourt = 1) {
   return grid
 }
 
+const ROSTER = [
+  'Abbey, Stephanie',
+  'Chen, Alice',
+  'Waters, Eadan',
+  'Reeves, Sam',
+  'Zhou, Zhongyi',
+  'Andreoli, Mia',
+  'Shi, Kelly',
+]
+
 // Seed reservations on the view-only day (like the real sheet's Wednesday
 // reservations that the old parser used to drop).
 const seedNames = {
@@ -86,24 +96,62 @@ const seedNames = {
   'USD': { court: 2, names: ['Andreoli, Mia', 'Shi, Kelly'] },
 }
 
+// Practice-site seeds spread over past / today / tomorrow so the reservation
+// search has something to show in every section during local verification:
+//   Peninsula = two consecutive 30-minute slots -> ONE 60-minute session
+//   Barnes    = two separate 30-minute sessions
+const practiceSeeds = [
+  { location: 'Peninsula Tennis Club', dayIndex: 0, court: 1, starts: ['8:00 AM', '8:30 AM'], names: ['Abbey, Stephanie', 'Chen, Alice'] },
+  { location: 'Barnes Tennis Center', dayIndex: 1, court: 4, starts: ['9:00 AM'], names: ['Abbey, Stephanie'] },
+  { location: 'Barnes Tennis Center', dayIndex: 2, court: 4, starts: ['8:00 AM', '8:30 AM'], names: ['Abbey, Stephanie'] },
+  // Tomorrow's seeds deliberately use players the API integration tests never
+  // book, so those tests still start from a clean 0/2-session slate.
+  { location: 'Peninsula Tennis Club', dayIndex: 3, court: 12, starts: ['10:00 AM', '10:30 AM'], names: ['Waters, Eadan', 'Shi, Kelly'] },
+  { location: 'Point Loma Nazarene College', dayIndex: 3, court: 6, starts: ['9:00 AM', '9:30 AM'], names: ['Waters, Eadan'] },
+]
+
+function sectionRowRange(grid, dayIndex) {
+  const label = dateLabel(DAY_KEYS[dayIndex])
+  const start = grid.findIndex((row) => String(row[0]).trim() === label)
+  if (start === -1) return null
+  let end = grid.length
+  for (let r = start + 1; r < grid.length; r++) {
+    if (/^(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s/i.test(String(grid[r][0]).trim())) { end = r; break }
+  }
+  return { start, end }
+}
+
 const grids = {}
 for (const tab of tabs) {
   const ncourts = tab === 'Barnes TC' ? 3 : tab === 'Peninsula Tennis Club' ? 12 : 6
   // Barnes courts are numbered 4..6 in the real sheet.
   const grid = emptyGrid(ncourts, tab === 'Barnes TC' ? 4 : 1)
-  const seed = seedNames[LOCATION_MAP[tab]]
+  const location = LOCATION_MAP[tab]
+  const seed = seedNames[location]
   if (seed) {
-    const viewOnlyLabel = dateLabel(DAY_KEYS[4])
-    for (let r = 0; r < grid.length; r++) {
-      if (String(grid[r][0]).includes(viewOnlyLabel)) {
-        for (let rr = r + 1; rr < grid.length; rr++) {
-          if (String(grid[rr][0]).includes('8:30 AM')) {
-            grid[rr][(seed.court - 1) * 2 + 2] = seed.names[0]
-            grid[rr + 1][(seed.court - 1) * 2 + 2] = seed.names[1]
-            break
-          }
+    const range = sectionRowRange(grid, 4)
+    if (range) {
+      for (let rr = range.start + 1; rr < range.end; rr++) {
+        if (String(grid[rr][0]).includes('8:30 AM')) {
+          grid[rr][(seed.court - 1) * 2 + 2] = seed.names[0]
+          grid[rr + 1][(seed.court - 1) * 2 + 2] = seed.names[1]
+          break
         }
-        break
+      }
+    }
+  }
+
+  for (const p of practiceSeeds.filter((s) => s.location === location)) {
+    const range = sectionRowRange(grid, p.dayIndex)
+    if (!range) continue
+    const baseCourt = tab === 'Barnes TC' ? 4 : 1
+    const courtCol = (p.court - baseCourt) * 2 + 1
+    for (const startLabel of p.starts) {
+      for (let rr = range.start + 1; rr < range.end; rr++) {
+        if (String(grid[rr][0]).trim() === startLabel) {
+          p.names.forEach((n, i) => { grid[rr + (i > 0 ? 1 : 0)][courtCol + (i > 1 ? 1 : 0)] = n })
+          break
+        }
       }
     }
   }
@@ -302,7 +350,7 @@ const server = http.createServer((req, res) => {
       if (!Object.keys(slots).length) delete all[key]
     }
     return send({ success: true, version: SCRIPT_VERSION, data: {
-      roster: ['Abbey, Stephanie', 'Chen, Alice', 'Waters, Eadan', 'Reeves, Sam', 'Zhou, Zhongyi', 'Andreoli, Mia', 'Shi, Kelly'],
+      roster: ROSTER,
       reservations: all,
       days: [...new Set(days)].sort(),
       courtsByDate,
@@ -311,6 +359,18 @@ const server = http.createServer((req, res) => {
       defaultPracticeLocations: DEFAULT_PRACTICE_LOCATIONS,
     } })
   }
+  // Legacy/unpruned read-only payload (exactly like the deployed Apps Script's
+  // getAll): ended 30-minute slots are still included, which is what the
+  // reservation SEARCH needs so past sessions remain visible.
+  if (req.method === 'GET' && ['getAll', 'getReservations'].includes(url.searchParams.get('action'))) {
+    return send({
+      success: true,
+      version: SCRIPT_VERSION,
+      roster: ROSTER,
+      reservations: currentReservations(),
+    })
+  }
+
   if (req.method === 'GET' && url.searchParams.get('action') === 'ping') {
     return send({ success: true, version: SCRIPT_VERSION, tabs })
   }
