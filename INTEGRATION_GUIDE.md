@@ -52,7 +52,7 @@ the write either fully succeeds or fully fails (half of a group is never saved).
 
 ## How to redeploy the Apps Script (v2.1)
 
-The repository now contains version **2.1** of `CourtzAppsScript.gs`. To put it live:
+The repository now contains version **2.1.1** of `CourtzAppsScript.gs`. To put it live:
 
 1. Open the **test copy** of the Google Sheet.
 2. Click **Extensions → Apps Script**.
@@ -71,7 +71,7 @@ To check which version is live, open:
 https://script.google.com/macros/s/AKfycbzlHIg__YqQdq9ohWvFdu9wCZZ27S5XPTYeBCV3y9IdDx1AZmZjs7vaV3rcZVz2lFaW6g/exec?action=ping
 ```
 
-It should show `"success":true` and `"version":"2.1"`.
+It should show `"success":true` and `"version":"2.1.1"`.
 
 > If you ever see an old version here, the deployment was not updated (step 6/7) or
 > the script code in the Apps Script editor was not saved.

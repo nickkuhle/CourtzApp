@@ -22,7 +22,7 @@ import {
 } from '../lib/booking-rules.js'
 import { DEFAULT_PRACTICE_LOCATIONS } from '../lib/locations.js'
 
-const SCRIPT_VERSION = '2.1'
+const SCRIPT_VERSION = '2.1.1'
 
 const LOCATION_MAP = {
   'Barnes TC': 'Barnes Tennis Center',
@@ -402,5 +402,5 @@ const server = http.createServer((req, res) => {
 })
 
 server.listen(PORT, '127.0.0.1', () => {
-  console.log(`mock apps script (v2.1) listening on http://127.0.0.1:${PORT}/exec`)
+  console.log(`mock apps script (v${SCRIPT_VERSION}) listening on http://127.0.0.1:${PORT}/exec`)
 })

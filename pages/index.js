@@ -565,7 +565,7 @@ export default function Home() {
       return
     }
     setFindLocation(selectedLocation || activeLocations[0])
-    setFindDuration(isBarnesLocation(selectedLocation) ? 30 : 30)
+    setFindDuration(30) // Barnes is 30-minute only; other sites can extend to 60 in step 3
     setFindTime('')
     setFindNotice(null)
     setShowFindCourt(true)
@@ -1155,7 +1155,13 @@ export default function Home() {
                   <div className="space-y-2">
                     {findCourts.map((r) => {
                       const isMine = r.mine
-                      const isSaving = Boolean(pendingReservations[`book|${r.location}|${selectedDay}|${r.courtId}|${findSlots.join(',')}|${currentPlayer}`])
+                      // Pending keys are "mode|location|date|court|slots|names"
+                      // (see handleGroupWrite); the names part varies once
+                      // extra players join a booking, so match by prefix.
+                      const pendingPrefix = `${r.location}|${selectedDay}|${r.courtId}|${findSlots.join(',')}|`
+                      const isSaving = Object.keys(pendingReservations).some(
+                        (k) => k.startsWith(`book|${pendingPrefix}`) || k.startsWith(`cancel|${pendingPrefix}`)
+                      )
                       return (
                         <div
                           key={`${r.location}-${r.courtId}`}

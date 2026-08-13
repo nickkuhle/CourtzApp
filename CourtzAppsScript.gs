@@ -2,7 +2,10 @@
 // SHEET_ID: 1U3TcsbIhQ9lxeo0_LtHYTldIqbkWg2Je  (TEST COPY - do not point at the real sheet)
 // Bump SCRIPT_VERSION on every edit so the app (and you) can verify which
 // deployment is actually live via WEBAPP_URL?action=ping.
-const SCRIPT_VERSION = "2.1";
+// 2.1.1: the 2-session-per-day limit now compares LOCATION as well as court
+// and start time, so a same-numbered court at another venue can no longer be
+// used to dodge the maximum.
+const SCRIPT_VERSION = "2.1.1";
 const SHEET_ID = "1U3TcsbIhQ9lxeo0_LtHYTldIqbkWg2Je";
 const DEFAULT_TOURNAMENT_YEAR = "2026";
 const LOCATION_MAP = {
@@ -695,6 +698,7 @@ function validateBookingGS(opts) {
   const reservations = opts.reservations || {};
   const practiceLocations = opts.practiceLocations;
 
+  const cleanedLocation = String(location || "").trim();
   const cleanedNames = [];
   (opts.names || []).forEach(n => {
     const v = String(n).trim();
@@ -730,8 +734,12 @@ function validateBookingGS(opts) {
 
     const all = existing.slice();
     let sameIndex = -1;
+    // "Same session" means same LOCATION, same court and same start time.
+    // Comparing only court + start let a player dodge the 2-session maximum by
+    // booking a same-numbered court at a different venue (e.g. Barnes Court 4
+    // vs Peninsula Court 4), because the new session was never counted.
     for (let i = 0; i < all.length; i++) {
-      if (String(all[i].court) === proposed.courtId && all[i].start === proposed.start) { sameIndex = i; break; }
+      if (all[i].location === cleanedLocation && String(all[i].court) === proposed.courtId && all[i].start === proposed.start) { sameIndex = i; break; }
     }
     let proposedSessionObj = null;
     if (sameIndex === -1) {
@@ -861,7 +869,7 @@ function bookGroup(ss, data) {
       throw new Error("Slot already booked on " + sheetName + " " + data.date + " Court " + data.courtId + " " + slots[si] + " (by " + filled.map(c => c.value).join(", ") + ")");
     }
     if (found.cells.length < names.length) {
-      throw new Error("Court " + data.courtId + " has only " + found.cells.length + " cells for " + slots.length + " player(s) at " + slots[si]);
+      throw new Error("Court " + data.courtId + " has only " + found.cells.length + " cells for " + names.length + " player(s) at " + slots[si]);
     }
     perSlotCapacity.push(found.cells.length);
     // Assign one cell per player, filling the slot's cells in order.
