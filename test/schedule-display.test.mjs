@@ -3,6 +3,9 @@ import test from 'node:test'
 
 import {
   courtSessionBlocks,
+  currentReservationPlayers,
+  describeFocusedSession,
+  formatPlayerFirstName,
   formatPlayerName,
   playerColorIndex,
   playerInitials,
@@ -80,6 +83,37 @@ test('court display blocks keep every Barnes 30-minute slot separate', () => {
   assert.equal(blocks.length, 2)
   assert.deepEqual(blocks.map((block) => block.slots.length), [1, 1])
   assert.deepEqual(blocks.map((block) => block.timeRange), ['8:00 AM–8:30 AM', '8:30 AM–9:00 AM'])
+})
+
+test('focused session prefers the reservation on court now, then the next one', () => {
+  const reservations = {}
+  add(reservations, BARNES, '2026-08-12', 4, 720, [PLAYER]) // 12:00–12:30, already ended
+  add(reservations, BARNES, '2026-08-12', 4, 780, [PLAYER, SECOND_PLAYER]) // 1:00–1:30, current at 1:15
+  add(reservations, BARNES, '2026-08-12', 4, 840, [SECOND_PLAYER]) // 2:00–2:30, later
+
+  const blocks = courtSessionBlocks(reservations, {
+    dateKey: '2026-08-12',
+    location: BARNES,
+    court: 4,
+  })
+
+  const current = describeFocusedSession(blocks, { dateKey: '2026-08-12', nowMs: NOW })
+  assert.equal(current.kind, 'current')
+  assert.equal(current.block.timeRange, '1:00 PM–1:30 PM')
+  assert.deepEqual(currentReservationPlayers(blocks, { dateKey: '2026-08-12', nowMs: NOW }), [SECOND_PLAYER, PLAYER])
+
+  const afterCurrent = Date.UTC(2026, 7, 12, 20, 40) // 1:40 PM PDT
+  const next = describeFocusedSession(blocks, { dateKey: '2026-08-12', nowMs: afterCurrent })
+  assert.equal(next.kind, 'next')
+  assert.equal(next.block.timeRange, '2:00 PM–2:30 PM')
+  assert.deepEqual(currentReservationPlayers(blocks, { dateKey: '2026-08-12', nowMs: afterCurrent }), [])
+
+  const tomorrow = describeFocusedSession(blocks, { dateKey: '2026-08-13', nowMs: NOW })
+  assert.equal(tomorrow.kind, 'next')
+  assert.equal(tomorrow.index, 0)
+
+  assert.equal(describeFocusedSession([], { dateKey: '2026-08-12', nowMs: NOW }).index, -1)
+  assert.equal(formatPlayerFirstName(PLAYER), 'Stephanie')
 })
 
 test('player reservation search covers every location and splits past, today, and upcoming', () => {

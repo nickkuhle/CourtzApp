@@ -12,3 +12,41 @@ body {
   text-rendering: optimizeLegibility;
   hyphens: auto;
 }
+
+.hide-scrollbar {
+  scrollbar-width: none;
+}
+
+.hide-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
+@keyframes daySlideNext {
+  from {
+    transform: translateX(18%);
+    opacity: 0.35;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+
+@keyframes daySlidePrev {
+  from {
+    transform: translateX(-18%);
+    opacity: 0.35;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+
+.day-slide-next {
+  animation: daySlideNext 0.38s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.day-slide-prev {
+  animation: daySlidePrev 0.38s cubic-bezier(0.22, 1, 0.36, 1);
+}
