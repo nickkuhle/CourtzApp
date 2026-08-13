@@ -114,8 +114,9 @@ function Slot({ time, reservedBy = [], currentPlayer, onClick, disabled, ended, 
 // that have already ended are view-only: they can be inspected but never
 // booked or canceled.
 export default function CourtSchedule({ court, date, location, reservations, currentPlayer = 'Alice Johnson', pendingReservations = {}, practiceLocations = null, viewOnly = false, completedSlots = null, barnesOnly30 = false, onOpenBooking, onPreviousCourt, onNextCourt, canGoPrevious = false, canGoNext = false, onClose }) {
-  if (!court) return null
-
+  // Hooks must run unconditionally, before the early return below: returning
+  // first would break the Rules of Hooks (and crash with "Rendered fewer hooks
+  // than expected") if this component ever stayed mounted while court is null.
   useEffect(() => {
     function handleKeyDown(event) {
       if (event.key === 'ArrowLeft' && canGoPrevious) onPreviousCourt?.()
@@ -125,6 +126,8 @@ export default function CourtSchedule({ court, date, location, reservations, cur
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
   }, [canGoPrevious, canGoNext, onPreviousCourt, onNextCourt, onClose])
+
+  if (!court) return null
 
   // Count slots for summary
   const key = `${location}|${date}|${court}`
@@ -286,8 +289,14 @@ export default function CourtSchedule({ court, date, location, reservations, cur
               const ended = completedSlots ? completedSlots.has(slot.label) : false
               const isOwnedByCurrentPlayer = players.includes(currentPlayer)
               const isReservedBySomeoneElse = players.length > 0 && !isOwnedByCurrentPlayer
-              const requestKey = `${key}|${slot.label}|${currentPlayer}`
-              const isSaving = Boolean(pendingReservations[requestKey])
+              // Pending writes are keyed "mode|location|date|court|slots|names"
+              // in handleGroupWrite (pages/index.js). A booking may also carry
+              // extra players, and a cancel carries the whole group, so match
+              // by prefix for this court + slot rather than one exact key.
+              const slotPrefix = `${key}|${slot.label}|`
+              const isSaving = Object.keys(pendingReservations).some(
+                (k) => k.startsWith(`book|${slotPrefix}`) || k.startsWith(`cancel|${slotPrefix}`)
+              )
               return (
                 <Slot
                   key={slot.label}

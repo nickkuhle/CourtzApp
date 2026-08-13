@@ -73,6 +73,48 @@ test('loads reservations, roster, dates and courts from the supplied Apps Script
   assert.equal(schedule.reservations['Barnes Tennis Center|2001-08-11|4'], undefined)
 })
 
+test('the service-account fallback keeps the grid days and courts (empty courts included)', async () => {
+  // Regression: getSchedule's fallback used to throw away the days/courtsByDate
+  // reported by the service-account grid read and re-derive them from
+  // reservation keys, so empty courts (e.g. Barnes Court 6) disappeared.
+  const { composeFallbackSchedule } = await loadFreshSheetsModule('fallback-grid')
+  const schedule = composeFallbackSchedule({
+    reservations: {
+      'Barnes Tennis Center|2026-08-11|4': { '8:00 AM–8:30 AM': ['Abbey, Stephanie'] },
+    },
+    roster: ['Abbey, Stephanie'],
+    source: 'service-account',
+    gridDays: ['2026-08-10', '2026-08-11', '2026-08-10'], // unsorted, duplicated
+    gridCourtsByDate: {
+      '2026-08-10': { 'Barnes Tennis Center': [4, 5, 6] },
+      '2026-08-11': { 'Barnes Tennis Center': [4, 5, 6] }, // court 6 has no bookings
+    },
+  })
+
+  assert.equal(schedule.source, 'service-account')
+  assert.equal(schedule.connected, true)
+  assert.deepEqual(schedule.days, ['2026-08-10', '2026-08-11']) // sorted + deduped
+  assert.deepEqual(schedule.courtsByDate['2026-08-11']['Barnes Tennis Center'], [4, 5, 6])
+  assert.deepEqual(schedule.courtsByDate['2026-08-10']['Barnes Tennis Center'], [4, 5, 6])
+})
+
+test('the fallback derives days and courts from reservation keys only when no grid data exists', async () => {
+  const { composeFallbackSchedule } = await loadFreshSheetsModule('fallback-derive')
+  const schedule = composeFallbackSchedule({
+    reservations: {
+      'Barnes Tennis Center|2026-08-11|4': { '8:00 AM–8:30 AM': ['Abbey, Stephanie'] },
+    },
+    roster: null,
+    source: 'local',
+  })
+
+  assert.equal(schedule.connected, false) // local files cannot write to the sheet
+  assert.deepEqual(schedule.roster, [])
+  assert.ok(schedule.days.includes('2026-08-11'))
+  assert.deepEqual(schedule.courtsByDate['2026-08-11']['Barnes Tennis Center'], [4])
+  assert.deepEqual(schedule.locations, ['Barnes Tennis Center'])
+})
+
 test('derives days and courts from reservations when talking to a legacy deployment', async () => {
   delete process.env.SHEETS_WEBAPP_URL
   global.fetch = async (url) => {

@@ -204,6 +204,64 @@ test('a third session is rejected (hard limit - staff approval cannot bypass it)
   assert.equal(withApproval.isSessionLimitError, true)
 })
 
+test('the hard limit also applies when another venue has a same-numbered court at the same start time', () => {
+  // Regression: the "same session" check used to compare only court + start
+  // (not location), so a session on Barnes Court 4 at 8:00 made a NEW booking
+  // on Peninsula Court 4 at 8:00 invisible to the count - the 2-session
+  // maximum could be bypassed across venues with overlapping court numbers.
+  const reservations = mkReservations([
+    { loc: BARNES, date: TODAY, court: 4, slots: [[480, 'A'], [510, 'A']] }, // 2 Barnes sessions (the max)
+  ])
+  assert.equal(
+    existingPlayerSessions(reservations, { dateKey: TODAY, name: 'A', practiceLocations: DEFAULTS }).length,
+    2
+  )
+
+  // Peninsula has a Court 4 too. Booking it at 8:00 is a THIRD session.
+  const third = book({
+    location: PEN,
+    courtId: 4,
+    slots: [slot(480)],
+    reservations,
+    staffApproved: true, // proximity is approvable; the hard limit stays
+  })
+  assert.equal(third.ok, false)
+  assert.equal(third.isSessionLimitError, true)
+  assert.match(third.error, /maximum is 2/)
+})
+
+test('a second session on a same-numbered court at another venue is allowed but needs staff approval', () => {
+  // Same court number + start at a different venue is a DISTINCT session, so
+  // with only one existing session the booking is fine - but the two sessions
+  // start at the same time, so the proximity warning still applies.
+  const reservations = mkReservations([
+    { loc: BARNES, date: TODAY, court: 4, slots: [[480, 'A']] },
+  ])
+
+  const withoutApproval = book({ location: PEN, courtId: 4, slots: [slot(480)], reservations })
+  assert.equal(withoutApproval.ok, true)
+  assert.equal(withoutApproval.warnings.length, 1)
+  assert.match(withoutApproval.warnings[0], /staff approval required/)
+
+  const withApproval = book({ location: PEN, courtId: 4, slots: [slot(480)], staffApproved: true, reservations })
+  assert.equal(withApproval.ok, true)
+  assert.deepEqual(withApproval.warnings, [])
+})
+
+test('re-validating a player\'s own slot at the same venue/court/start still counts as one session', () => {
+  // The "same session" match that the fix above narrowed must still work for
+  // its intended case: re-checking a booking the player already holds must not
+  // count it a second time. At two existing sessions a double-count would hit
+  // the hard limit, so the boundary makes the distinction observable.
+  const reservations = mkReservations([
+    { loc: BARNES, date: TODAY, court: 5, slots: [[720, 'A']] },
+    { loc: PEN, date: TODAY, court: 1, slots: [[480, 'A']] },
+  ])
+  const result = book({ location: PEN, courtId: 1, slots: [slot(480)], reservations, staffApproved: true })
+  assert.equal(result.ok, true)
+  assert.equal(result.error, null)
+})
+
 test('a 60-minute non-Barnes booking does NOT warn because of its own two internal slots', () => {
   const result = book({ courtId: 1, slots: [slot(480), slot(510)] })
   assert.equal(result.ok, true)

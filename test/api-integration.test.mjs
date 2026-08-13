@@ -111,7 +111,7 @@ test('schedule API reports every location, defaults, days and practice sessions'
   await startMock()
   const schedule = await getSchedule()
   assert.equal(schedule.connected, true)
-  assert.equal(schedule.scriptVersion, '2.1')
+  assert.equal(schedule.scriptVersion, '2.1.1')
   for (const loc of ['Barnes Tennis Center', 'Peninsula Tennis Club', 'Point Loma Nazarene College', 'Pacific Beach Tennis Club', 'Balboa Tennis Center', 'USD']) {
     assert.ok(schedule.locations.includes(loc), `${loc} should be reported`)
   }
