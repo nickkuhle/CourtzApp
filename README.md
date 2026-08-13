@@ -64,7 +64,7 @@ SHEETS_WEBAPP_URL=http://127.0.0.1:3100/exec npm run dev   # terminal 2
 ### Booking rules (v2.2)
 
 - The schedule includes past and ended reservations for history/search, but bookings and cancellations are only allowed for **today and tomorrow** (America/Los_Angeles), and ended 30-minute slots cannot be changed. Enforced in the UI, the Next.js API, and `CourtzAppsScript.gs`.
-- Max **2 practice sessions per player per day**. Barnes slots each count as one session; a continuous 1-hour booking elsewhere counts as one session. Back-to-back/close sessions require explicit tournament-staff approval; the optional `STAFF_APPROVAL_CODE` prevents callers from self-asserting approval. The 2-session maximum can never be bypassed, including through legacy toggle requests.
+- Max **2 practice sessions per player per day**. Barnes slots each count as one session; a continuous 1-hour booking elsewhere counts as one session. Back-to-back/close sessions require explicit tournament-staff approval; the approval prompt only appears for a real conflict (the same player's own nearby session, or being booked in two places at once), never for a slot the player already holds. The optional `STAFF_APPROVAL_CODE` prevents callers from self-asserting approval. The 2-session maximum can never be bypassed, including through legacy toggle requests.
 - Barnes, Peninsula and PLNU are shown by default; USD, Balboa and Pacific Beach stay hidden (match-play sites) and can be added with **+ Add site**.
 
 See [INTEGRATION_GUIDE.md](./INTEGRATION_GUIDE.md) for the step-by-step setup,

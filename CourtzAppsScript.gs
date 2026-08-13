@@ -4,7 +4,11 @@
 // deployment is actually live via WEBAPP_URL?action=ping.
 // 2.3: allows shared occupancy up to 4 players per 30-min slot (fixes Player B cannot book after Player A),
 //      ensures close-session warning is per same player only, and improves staff-code prompt handling.
-const SCRIPT_VERSION = "2.3";
+// 2.4: the close-session warning no longer fires against a slot the player
+//      ALREADY holds. Validation now projects the day the player would end up
+//      with (their own slots merged with the requested ones), so re-confirming
+//      or extending an existing booking never warns about itself.
+const SCRIPT_VERSION = "2.4";
 const SHEET_ID = "1U3TcsbIhQ9lxeo0_LtHYTldIqbkWg2Je";
 const DEFAULT_TOURNAMENT_YEAR = "2026";
 // Prefer setting STAFF_APPROVAL_CODE as an Apps Script script property
@@ -591,11 +595,14 @@ function cleanPracticeLocationsGS(list) {
   return out.length ? out : PRACTICE_DEFAULTS.slice();
 }
 
-function existingPlayerSessionsGS(reservations, dateKey, name, practiceLocations) {
+// Every 30-minute slot a player holds on dateKey, bucketed per location+court:
+//   { "Player|Location|Court": { player, location, court, starts: {start: slotLabel} } }
+// Only active practice locations are included. Both the existing-session
+// grouping and the "day after this booking" projection build on this.
+function playerSlotsByCourtGS(reservations, dateKey, name, practiceLocations) {
   const active = {};
   cleanPracticeLocationsGS(practiceLocations).forEach(l => { active[l] = true; });
-  const groups = [];
-  const seen = {};
+  const byCourt = {};
   for (const key in reservations) {
     const parts = String(key).split("|");
     const location = parts[0], date = parts[1], court = parts[2];
@@ -604,45 +611,103 @@ function existingPlayerSessionsGS(reservations, dateKey, name, practiceLocations
     if (!active[location]) continue;
     const slots = reservations[key];
     if (!slots || typeof slots !== "object") continue;
-    const byPlayer = {};
     for (const slotLabel in slots) {
       const start = timeToMinutes(slotStartLabel(slotLabel));
       if (isNaN(start)) continue;
       const names = Array.isArray(slots[slotLabel]) ? slots[slotLabel] : [slots[slotLabel]];
       names.forEach(raw => {
-        const n = String(raw).trim();
-        if (!n) return;
-        if (!byPlayer[n]) byPlayer[n] = [];
-        byPlayer[n].push({ start: start, slotLabel: slotLabel });
-      });
-    }
-    for (const player in byPlayer) {
-      if (name && player !== name) continue;
-      const sorted = byPlayer[player].slice().sort(function (a, b) { return a.start - b.start; });
-      const sessions = [];
-      let current = null;
-      for (let i = 0; i < sorted.length; i++) {
-        const entry = sorted[i];
-        if (isBarnesLocationGS(location)) {
-          sessions.push({ location: location, court: court, start: entry.start, slots: [entry.slotLabel] });
-          continue;
-        }
-        if (current && entry.start === current.start + 30 && current.slots.length < 2) {
-          current.slots.push(entry.slotLabel);
-        } else {
-          current = { location: location, court: court, start: entry.start, slots: [entry.slotLabel] };
-          sessions.push(current);
-        }
-      }
-      sessions.forEach(function (s) {
-        const id = player + "|" + location + "|" + court + "|" + s.start;
-        if (seen[id]) return;
-        seen[id] = true;
-        groups.push({ player: player, location: s.location, court: s.court, start: s.start, slots: s.slots });
+        const player = String(raw).trim();
+        if (!player) return;
+        if (name && player !== name) return;
+        const bucketKey = player + "|" + location + "|" + court;
+        if (!byCourt[bucketKey]) byCourt[bucketKey] = { player: player, location: location, court: court, starts: {} };
+        if (byCourt[bucketKey].starts[start] === undefined) byCourt[bucketKey].starts[start] = slotLabel;
       });
     }
   }
+  return byCourt;
+}
+
+// Groups one player's 30-minute slots on ONE court into sessions:
+//   Barnes -> one session per slot; elsewhere -> two consecutive slots = one.
+function groupSlotsIntoSessionsGS(bucket) {
+  const startList = Object.keys(bucket.starts)
+    .map(Number)
+    .sort(function (a, b) { return a - b; });
+  const sessions = [];
+  let current = null;
+  for (let i = 0; i < startList.length; i++) {
+    const start = startList[i];
+    const slotLabel = bucket.starts[start];
+    if (isBarnesLocationGS(bucket.location)) {
+      sessions.push({ location: bucket.location, court: bucket.court, start: start, slots: [slotLabel], starts: [start] });
+      continue;
+    }
+    if (current && start === current.start + 30 && current.slots.length < 2) {
+      current.slots.push(slotLabel);
+      current.starts.push(start);
+    } else {
+      current = { location: bucket.location, court: bucket.court, start: start, slots: [slotLabel], starts: [start] };
+      sessions.push(current);
+    }
+  }
+  return sessions;
+}
+
+function existingPlayerSessionsGS(reservations, dateKey, name, practiceLocations) {
+  const byCourt = playerSlotsByCourtGS(reservations, dateKey, name, practiceLocations);
+  const groups = [];
+  for (const bucketKey in byCourt) {
+    const bucket = byCourt[bucketKey];
+    groupSlotsIntoSessionsGS(bucket).forEach(function (s) {
+      groups.push({ player: bucket.player, location: s.location, court: s.court, start: s.start, slots: s.slots });
+    });
+  }
   return groups;
+}
+
+// The sessions a player would hold AFTER slots are added on location/courtId.
+// Slots the player already holds are merged in place, so re-validating (or
+// extending) a booking they are already part of never double-counts and never
+// warns about itself. Returns { sessions: [...{isNew}], addedSlotCount }.
+function sessionsAfterBookingGS(reservations, dateKey, name, practiceLocations, location, courtId, slots) {
+  const cleanedLocation = String(location || "").trim();
+  const court = String(courtId);
+  const byCourt = playerSlotsByCourtGS(reservations, dateKey, name, practiceLocations);
+  const bucketKey = name + "|" + cleanedLocation + "|" + court;
+  if (!byCourt[bucketKey]) {
+    // The proposed booking always counts, even at a hidden match-play site, so
+    // an unlisted location can never be used to dodge the daily limit.
+    byCourt[bucketKey] = { player: name, location: cleanedLocation, court: court, starts: {} };
+  }
+  const bucket = byCourt[bucketKey];
+  const addedStarts = {};
+  let addedSlotCount = 0;
+  (slots || []).forEach(function (raw) {
+    const label = String(raw).trim();
+    if (!label) return;
+    const start = timeToMinutes(slotStartLabel(label));
+    if (isNaN(start)) return;
+    if (bucket.starts[start] !== undefined) return; // already this player's own slot
+    bucket.starts[start] = label;
+    addedStarts[start] = true;
+    addedSlotCount++;
+  });
+  const sessions = [];
+  for (const k in byCourt) {
+    const held = byCourt[k];
+    const isTargetCourt = k === bucketKey;
+    groupSlotsIntoSessionsGS(held).forEach(function (s) {
+      let isNew = false;
+      if (isTargetCourt) {
+        for (let i = 0; i < s.starts.length; i++) {
+          if (addedStarts[s.starts[i]]) { isNew = true; break; }
+        }
+      }
+      sessions.push({ player: held.player, location: s.location, court: s.court, start: s.start, slots: s.slots, isNew: isNew });
+    });
+  }
+  return { sessions: sessions, addedSlotCount: addedSlotCount };
 }
 
 function proposedSessionGS(location, date, courtId, slots) {
@@ -698,30 +763,34 @@ function validateBookingGS(opts) {
     if (proposed.start === null) {
       return { ok: false, error: "The time slot \"" + cleanedSlots.join("\", \"") + "\" could not be read." };
     }
-    const all = existing.slice();
-    let sameIndex = -1;
-    for (let i = 0; i < all.length; i++) {
-      if (all[i].location === cleanedLocation && String(all[i].court) === proposed.courtId && all[i].start === proposed.start) { sameIndex = i; break; }
-    }
-    let proposedSessionObj = null;
-    if (sameIndex === -1) {
-      proposedSessionObj = { location: location, court: proposed.courtId, start: proposed.start, slots: proposed.slots.slice() };
-      all.push(proposedSessionObj);
-    }
+    // The day as it would look AFTER this booking: the player's own slots are
+    // merged with the requested ones, so slots they already hold are never
+    // counted (or compared against) twice.
+    const projected = sessionsAfterBookingGS(reservations, date, player, practiceLocations, location, courtId, cleanedSlots);
+    const all = projected.sessions;
     if (action === "book") {
       if (all.length > MAX_SESSIONS_PER_DAY) {
-        hardLimitErrors.push(player + " would have " + all.length + " practice sessions on " + date + "; the maximum is " + MAX_SESSIONS_PER_DAY + ".");
+        hardLimitErrors.push(player + " already has " + existing.length + " of " + MAX_SESSIONS_PER_DAY + " practice sessions on " + date + " and would have " + all.length + "; the maximum is " + MAX_SESSIONS_PER_DAY + " sessions in one day.");
         continue;
       }
-      let closeSession = null;
-      for (let i = 0; i < all.length; i++) {
-        if (all[i] !== proposedSessionObj && all[i].start !== null && proposed.start !== null && Math.abs(all[i].start - proposed.start) <= 60) {
-          closeSession = all[i];
-          break;
+      // Nothing new for this player (they already hold every requested slot):
+      // re-confirming an existing booking can never need staff approval.
+      if (!projected.addedSlotCount) continue;
+      // Same-player-only proximity, comparing session STARTS. A session is only
+      // compared against the player's OTHER sessions, so neither the two halves
+      // of one 60-minute session nor a slot the player already held can trigger
+      // a warning about itself.
+      let conflict = false;
+      for (let i = 0; i < all.length && !conflict; i++) {
+        if (!all[i].isNew) continue;
+        for (let j = 0; j < all.length; j++) {
+          if (i === j) continue;
+          if (all[i].start === null || all[j].start === null) continue;
+          if (Math.abs(all[j].start - all[i].start) <= 60) { conflict = true; break; }
         }
       }
-      if (closeSession && !staffApproved) {
-        warnings.push(player + "'s new " + location + " session is within one hour of another practice session (staff approval required).");
+      if (conflict && !staffApproved) {
+        warnings.push(player + "'s new " + location + " session is within one hour of another practice session for the same player (staff approval required).");
       }
     }
   }
