@@ -21,7 +21,7 @@ import {
 } from '../lib/booking-rules.js'
 import { DEFAULT_PRACTICE_LOCATIONS } from '../lib/locations.js'
 
-const SCRIPT_VERSION = '2.3'
+const SCRIPT_VERSION = '2.4'
 const STAFF_APPROVAL_CODE = String(process.env.STAFF_APPROVAL_CODE || '').trim()
 let warnedAboutUnprotectedStaffApproval = false
 

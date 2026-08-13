@@ -1,5 +1,5 @@
 // End-to-end tests of the Next.js API routes against the local mock of the
-// v2.3 Apps Script backend (scripts/mock-apps-script.mjs). The mock's grid is
+// v2.4 Apps Script backend (scripts/mock-apps-script.mjs). The mock's grid is
 // generated relative to today (America/Los_Angeles): two past days, today,
 // tomorrow (bookable) and the day after tomorrow (view-only).
 //
@@ -122,7 +122,7 @@ test('schedule API reports every location, defaults, days and practice sessions'
   await startMock()
   const schedule = await getSchedule()
   assert.equal(schedule.connected, true)
-  assert.equal(schedule.scriptVersion, '2.3')
+  assert.equal(schedule.scriptVersion, '2.4')
   assert.equal(schedule.staffCodeRequired, true)
   for (const loc of ['Barnes Tennis Center', 'Peninsula Tennis Club', 'Point Loma Nazarene College', 'Pacific Beach Tennis Club', 'Balboa Tennis Center', 'USD']) {
     assert.ok(schedule.locations.includes(loc), `${loc} should be reported`)

@@ -262,6 +262,105 @@ test('re-validating a player\'s own slot at the same venue/court/start still cou
   assert.equal(result.error, null)
 })
 
+test('re-confirming a slot the players already hold does NOT warn (reported false positive)', () => {
+  // Reported bug: two players already sharing the 2:00 PM Barnes slot re-open
+  // the booking dialog (or add another player) and both get
+  // "...is within one hour of another practice session for the same player".
+  // Their own slot was compared against itself, so the warning was bogus.
+  const reservations = mkReservations([
+    { loc: BARNES, date: TODAY, court: 4, slots: [[480, 'Haile, Abigail'], [480, 'Daysog, Mami']] },
+  ])
+  const result = book({
+    location: BARNES,
+    courtId: 4,
+    slots: [slot(480)],
+    names: ['Haile, Abigail', 'Daysog, Mami'],
+    reservations,
+  })
+  assert.equal(result.ok, true)
+  assert.deepEqual(result.warnings, [])
+
+  // A brand-new player joining that same slot is also fine: nothing else is
+  // booked for them, so there is no real conflict.
+  const withNewPlayer = book({
+    location: BARNES,
+    courtId: 4,
+    slots: [slot(480)],
+    names: ['Haile, Abigail', 'Daysog, Mami', 'Newcomer, Nia'],
+    reservations,
+  })
+  assert.equal(withNewPlayer.ok, true)
+  assert.deepEqual(withNewPlayer.warnings, [])
+})
+
+test('extending an existing 30-minute non-Barnes booking to 60 minutes does NOT warn', () => {
+  // The player already holds 8:30-9:00 and re-books it as 8:00-9:00. The two
+  // halves are ONE session, so nothing is within an hour of anything else.
+  const reservations = mkReservations([
+    { loc: PEN, date: TODAY, court: 1, slots: [[510, 'A']] },
+  ])
+  const result = book({ location: PEN, courtId: 1, slots: [slot(480), slot(510)], reservations })
+  assert.equal(result.ok, true)
+  assert.deepEqual(result.warnings, [])
+
+  // ...and it is still counted as a single session, so a second one is allowed.
+  const after = mkReservations([
+    { loc: PEN, date: TODAY, court: 1, slots: [[480, 'A'], [510, 'A']] },
+  ])
+  const second = book({ location: PEN, courtId: 2, slots: [slot(660), slot(690)], reservations: after })
+  assert.equal(second.ok, true)
+  assert.deepEqual(second.warnings, [])
+})
+
+test('the warning still fires for each of the three real conflicts', () => {
+  // 1. Back-to-back / within one hour of the player's OWN existing session.
+  const backToBack = book({
+    location: BARNES,
+    courtId: 4,
+    slots: [slot(510)],
+    reservations: mkReservations([{ loc: BARNES, date: TODAY, court: 4, slots: [[480, 'A']] }]),
+  })
+  assert.equal(backToBack.ok, true)
+  assert.equal(backToBack.warnings.length, 1)
+  assert.match(backToBack.warnings[0], /staff approval required/)
+
+  // 2. More than 2 sessions per day is a hard error (never approvable).
+  const overLimit = book({
+    location: PEN,
+    courtId: 3,
+    slots: [slot(720)],
+    staffApproved: true,
+    reservations: mkReservations([
+      { loc: PEN, date: TODAY, court: 1, slots: [[480, 'A'], [510, 'A']] },
+      { loc: PEN, date: TODAY, court: 2, slots: [[600, 'A'], [630, 'A']] },
+    ]),
+  })
+  assert.equal(overLimit.ok, false)
+  assert.equal(overLimit.isSessionLimitError, true)
+
+  // 3. Booked in two places at once: same start, different venue/court.
+  const twoPlaces = book({
+    location: PEN,
+    courtId: 9,
+    slots: [slot(480)],
+    reservations: mkReservations([{ loc: BARNES, date: TODAY, court: 4, slots: [[480, 'A']] }]),
+  })
+  assert.equal(twoPlaces.ok, true)
+  assert.equal(twoPlaces.warnings.length, 1)
+  assert.match(twoPlaces.warnings[0], /staff approval required/)
+
+  // Control: another player's nearby session is NOT a conflict.
+  const otherPlayerOnly = book({
+    location: BARNES,
+    courtId: 4,
+    slots: [slot(510)],
+    names: ['A'],
+    reservations: mkReservations([{ loc: BARNES, date: TODAY, court: 4, slots: [[480, 'B']] }]),
+  })
+  assert.equal(otherPlayerOnly.ok, true)
+  assert.deepEqual(otherPlayerOnly.warnings, [])
+})
+
 test('a 60-minute non-Barnes booking does NOT warn because of its own two internal slots', () => {
   const result = book({ courtId: 1, slots: [slot(480), slot(510)] })
   assert.equal(result.ok, true)
