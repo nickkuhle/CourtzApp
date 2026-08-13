@@ -6,6 +6,7 @@ import {
   currentReservationPlayers,
   describeFocusedSession,
   formatPlayerFirstName,
+  formatPlayerName,
   playerInitials,
   playerStyle,
 } from '../lib/schedule-display'
