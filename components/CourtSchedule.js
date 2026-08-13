@@ -114,7 +114,7 @@ function Slot({ time, reservedBy = [], currentPlayer, onClick, disabled, ended, 
 // group booked in that slot. Days outside today/tomorrow and 30-minute slots
 // that have already ended are view-only: they can be inspected but never
 // booked or canceled.
-export default function CourtSchedule({ court, date, location, reservations, currentPlayer = 'Alice Johnson', pendingReservations = {}, practiceLocations = null, viewOnly = false, completedSlots = null, barnesOnly30 = false, onOpenBooking, onPreviousCourt, onNextCourt, canGoPrevious = false, canGoNext = false, onClose }) {
+export default function CourtSchedule({ court, date, location, reservations, currentPlayer = 'Alice Johnson', roster = [], onSelectPlayer, pendingReservations = {}, practiceLocations = null, viewOnly = false, completedSlots = null, barnesOnly30 = false, onOpenBooking, onPreviousCourt, onNextCourt, canGoPrevious = false, canGoNext = false, onClose }) {
   // Hooks must run unconditionally, before the early return below: returning
   // first would break the Rules of Hooks (and crash with "Rendered fewer hooks
   // than expected") if this component ever stayed mounted while court is null.
