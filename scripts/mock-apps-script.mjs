@@ -21,7 +21,7 @@ import {
 } from '../lib/booking-rules.js'
 import { DEFAULT_PRACTICE_LOCATIONS } from '../lib/locations.js'
 
-const SCRIPT_VERSION = '2.2'
+const SCRIPT_VERSION = '2.3'
 const STAFF_APPROVAL_CODE = String(process.env.STAFF_APPROVAL_CODE || '').trim()
 let warnedAboutUnprotectedStaffApproval = false
 
@@ -423,11 +423,19 @@ const server = http.createServer((req, res) => {
                 const startNorm = normalizeTimeMock(String(slot).split(/[–-]/)[0].trim())
                 const cells = locateSlotCells(values, data.date, data.courtId, startNorm)
                 if (!cells) return send({ success: false, version: SCRIPT_VERSION, error: 'Time slot not found: ' + slot })
-                const filled = cells.filter(c => c.value)
-                if (filled.length) return send({ success: false, version: SCRIPT_VERSION, error: 'Slot already booked on ' + tab + ' ' + data.date + ' Court ' + data.courtId })
+                // Prevent duplicate booking of same player in same slot
+                for (const name of names) {
+                  if (cells.some(c => c.value === name)) {
+                    return send({ success: false, version: SCRIPT_VERSION, error: `Slot ${slot} already booked by ${name} on Court ${data.courtId}` })
+                  }
+                }
+                const emptyCells = cells.filter(c => !c.value)
+                if (emptyCells.length < names.length) {
+                  return send({ success: false, version: SCRIPT_VERSION, error: `Slot ${slot} on Court ${data.courtId} only has ${emptyCells.length} open spot(s) for ${names.length} player(s) (already ${cells.length - emptyCells.length}/${cells.length} booked)` })
+                }
                 if (cells.length < names.length) return send({ success: false, version: SCRIPT_VERSION, error: 'Not enough cells' })
                 for (let i = 0; i < names.length; i++) {
-                  values[cells[i].row][cells[i].col] = names[i]
+                  values[emptyCells[i].row][emptyCells[i].col] = names[i]
                 }
               }
               return send({ success: true, version: SCRIPT_VERSION, action: 'bookGroup', warnings: validation.warnings })

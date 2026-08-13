@@ -1,7 +1,7 @@
 import React from 'react'
 import { formatPlayerName, playerInitials, playerStyle } from '../lib/schedule-display'
 
-export default function PlayerChip({ name, compact = false, highlight = false, className = '' }) {
+const PlayerChip = React.memo(function PlayerChip({ name, compact = false, highlight = false, className = '' }) {
   const style = playerStyle(name)
   return (
     <span
@@ -14,4 +14,6 @@ export default function PlayerChip({ name, compact = false, highlight = false, c
       <span className="truncate">{formatPlayerName(name)}</span>
     </span>
   )
-}
+})
+
+export default PlayerChip

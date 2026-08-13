@@ -1,4 +1,4 @@
-import React, { useEffect } from 'react'
+import React, { useEffect, useMemo } from 'react'
 import CourtSchedule from './CourtSchedule'
 import useHorizontalSwipe from './useHorizontalSwipe'
 
@@ -10,10 +10,10 @@ function Chevron({ direction }) {
   )
 }
 
-// Full-screen pager of court cards for one location. Opening a court from the
-// grid lands on that card; swiping or the arrows move between every court at
-// the site without leaving the booking UI.
-export default function CourtCardCarousel({
+// Full-screen pager of court cards for one location. Performance optimized:
+// only renders the current court plus immediate neighbors (prev/next) to keep
+// DOM light even when a location has 12 courts. Others are placeholders.
+const CourtCardCarousel = React.memo(function CourtCardCarousel({
   courts = [],
   selectedCourt,
   onSelectCourt,
@@ -69,6 +69,13 @@ export default function CourtCardCarousel({
     return () => window.removeEventListener('keydown', handleKeyDown)
   }, [index, count, courts, onSelectCourt, onClose])
 
+  const visibleRange = useMemo(() => {
+    // Render current + 1 neighbor each side for smooth swipe, others are placeholders
+    const start = Math.max(0, index - 1)
+    const end = Math.min(count - 1, index + 1)
+    return { start, end }
+  }, [index, count])
+
   if (!count || selectedCourt == null) return null
 
   const trackPercent = Math.max(count, 1) * 100
@@ -92,44 +99,53 @@ export default function CourtCardCarousel({
               willChange: 'transform',
             }}
           >
-            {courts.map((court, courtIndex) => (
-              <div
-                key={court.id}
-                data-court-id={court.id}
-                className="flex h-full shrink-0 items-stretch justify-center px-2 py-5 sm:px-4 sm:py-6"
-                style={{ width: `${slidePercent}%` }}
-                aria-hidden={court.id !== selectedCourt}
-                {...(court.id !== selectedCourt ? { inert: '' } : {})}
-              >
-                <div className="mx-auto flex h-full min-h-0 w-full max-w-2xl">
-                <CourtSchedule
-                  court={court.id}
-                  date={date}
-                  location={location}
-                  reservations={reservations}
-                  roster={roster}
-                  currentPlayer={currentPlayer}
-                  onSelectPlayer={onSelectPlayer}
-                  pendingReservations={pendingReservations}
-                  practiceLocations={practiceLocations}
-                  viewOnly={viewOnly}
-                  completedSlots={completedSlots}
-                  barnesOnly30={barnesOnly30}
-                  onOpenBooking={(payload) => onOpenBooking?.({
-                    ...payload,
-                    courtId: court.id,
-                    location,
-                    date,
-                  })}
-                  canGoPrevious={courtIndex > 0}
-                  canGoNext={courtIndex < count - 1}
-                  onPreviousCourt={() => courtIndex > 0 && onSelectCourt?.(courts[courtIndex - 1].id)}
-                  onNextCourt={() => courtIndex < count - 1 && onSelectCourt?.(courts[courtIndex + 1].id)}
-                  onClose={onClose}
-                />
+            {courts.map((court, courtIndex) => {
+              const isVisible = courtIndex >= visibleRange.start && courtIndex <= visibleRange.end
+              return (
+                <div
+                  key={court.id}
+                  data-court-id={court.id}
+                  className="flex h-full shrink-0 items-stretch justify-center px-2 py-5 sm:px-4 sm:py-6"
+                  style={{ width: `${slidePercent}%` }}
+                  aria-hidden={court.id !== selectedCourt}
+                  {...(court.id !== selectedCourt ? { inert: '' } : {})}
+                >
+                  <div className="mx-auto flex h-full min-h-0 w-full max-w-2xl">
+                    {isVisible ? (
+                      <CourtSchedule
+                        court={court.id}
+                        date={date}
+                        location={location}
+                        reservations={reservations}
+                        roster={roster}
+                        currentPlayer={currentPlayer}
+                        onSelectPlayer={onSelectPlayer}
+                        pendingReservations={pendingReservations}
+                        practiceLocations={practiceLocations}
+                        viewOnly={viewOnly}
+                        completedSlots={completedSlots}
+                        barnesOnly30={barnesOnly30}
+                        onOpenBooking={(payload) => onOpenBooking?.({
+                          ...payload,
+                          courtId: court.id,
+                          location,
+                          date,
+                        })}
+                        canGoPrevious={courtIndex > 0}
+                        canGoNext={courtIndex < count - 1}
+                        onPreviousCourt={() => courtIndex > 0 && onSelectCourt?.(courts[courtIndex - 1].id)}
+                        onNextCourt={() => courtIndex < count - 1 && onSelectCourt?.(courts[courtIndex + 1].id)}
+                        onClose={onClose}
+                      />
+                    ) : (
+                      <div className="flex h-full w-full items-center justify-center rounded-2xl bg-white/50 text-slate-400">
+                        <span className="text-sm">Court {court.id}</span>
+                      </div>
+                    )}
+                  </div>
                 </div>
-              </div>
-            ))}
+              )
+            })}
           </div>
         </div>
 
@@ -164,4 +180,6 @@ export default function CourtCardCarousel({
       </div>
     </div>
   )
-}
+})
+
+export default CourtCardCarousel

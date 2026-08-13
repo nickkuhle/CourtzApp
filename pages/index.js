@@ -19,6 +19,7 @@ import {
 import { DEFAULT_PRACTICE_LOCATIONS, MATCH_PLAY_LOCATIONS, isBarnesLocation } from '../lib/locations'
 
 const LOGO_URL = '/logo.svg'
+const MAX_PLAYERS_PER_SLOT = 4
 
 // Fallback lists used only when the sheet cannot be reached or a legacy
 // deployment does not report metadata. The three practice sites are shown by
@@ -153,8 +154,9 @@ function pickDefaultDay(days) {
 }
 
 // Courts a player can act on for one window (one or more consecutive 30-minute
-// parts): courts that are completely open for every part, plus courts already
-// booked by that player (so they can cancel from the same list).
+// parts): courts that have at least one free spot (<4 players) for every part,
+// plus courts already booked by that player (so they can cancel from the same list).
+// Fixed to allow shared bookings: previously anyTaken blocked other players even when 3 spots were open.
 function findCourtsForBooking(courtsList, reservations, location, dateKey, slots, name) {
   return (courtsList || [])
     .map((courtId) => {
@@ -162,10 +164,11 @@ function findCourtsForBooking(courtsList, reservations, location, dateKey, slots
         const players = reservations[`${location}|${dateKey}|${courtId}`]?.[slot]
         return Array.isArray(players) ? players : []
       })
-      const anyTaken = parts.some((p) => p.length > 0)
       const mine = parts.some((p) => p.includes(name))
-      const open = !anyTaken
-      return open || mine ? { location, courtId, mine } : null
+      const full = parts.some((p) => p.length >= MAX_PLAYERS_PER_SLOT && !p.includes(name))
+      if (full) return null
+      const maxOccupancy = Math.max(0, ...parts.map((p) => p.length))
+      return { location, courtId, mine, occupancy: maxOccupancy }
     })
     .filter(Boolean)
     .sort((a, b) => Number(b.mine) - Number(a.mine) || a.courtId - b.courtId)
@@ -390,7 +393,7 @@ export default function Home() {
     })
   }, [reservations, selectedDay, currentPlayer, activeLocations])
 
-  function timeLabelToMinutes(label) {
+  const timeLabelToMinutes = useCallback((label) => {
     const m = String(label).match(/(\d{1,2}):(\d{2})\s*(AM|PM)/i)
     if (!m) return 0
     let h = Number(m[1])
@@ -399,7 +402,7 @@ export default function Home() {
     if (ap === 'PM' && h !== 12) h += 12
     if (ap === 'AM' && h === 12) h = 0
     return h * 60 + min
-  }
+  }, [])
 
   // 30-minute parts that make up the requested window. Barnes only ever
   // offers 30-minute bookings, even if a 1-hour length was chosen earlier.
@@ -412,7 +415,7 @@ export default function Home() {
       parts.push(`${formatTimeLabel(startMinutes + 30)}–${formatTimeLabel(startMinutes + 60)}`)
     }
     return parts
-  }, [findTime, findDuration, findLocation])
+  }, [findTime, findDuration, findLocation, timeLabelToMinutes])
 
   // Recomputed on every render of the modal, so results stay accurate even
   // right after a booking is made from inside Find a Court.
@@ -421,9 +424,9 @@ export default function Home() {
     return findCourtsForBooking(courtsByDate[findDay]?.[findLocation] || [], reservations, findLocation, findDay, findSlots, currentPlayer)
   }, [showFindCourt, findLocation, findDay, findSlots, reservations, currentPlayer, courtsByDate])
 
-  function handleSelectCourt(id) {
+  const handleSelectCourt = useCallback((id) => {
     setSelectedCourt(id)
-  }
+  }, [])
 
   // A refresh can drop a court that was open; never leave the carousel on a
   // court that is no longer in the selected location/day.
@@ -436,15 +439,19 @@ export default function Home() {
   // The optimistic UI change is applied immediately, then the whole group is
   // written to the sheet in one request; on failure every name is rolled back
   // so a half-saved group is never shown or stored.
-  async function handleGroupWrite({ mode, location, date, courtId, slots, names, staffApproved = false, staffCode = null }) {
+  const handleGroupWrite = useCallback(async ({ mode, location, date, courtId, slots, names, staffApproved = false, staffCode = null }) => {
     const reservationKey = `${location}|${date}|${courtId}`
     const requestKey = `${mode}|${reservationKey}|${slots.join(',')}|${names.join(',')}`
     if (pendingReservations[requestKey]) return
 
     // Snapshot the affected slots so a failed write can be undone exactly.
     const snapshot = {}
-    slots.forEach((slot) => {
-      snapshot[slot] = [...((reservations[reservationKey]?.[slot] || []) )]
+    // Use functional read to avoid stale closure
+    setReservations((current) => {
+      slots.forEach((slot) => {
+        snapshot[slot] = [...((current[reservationKey]?.[slot] || []) )]
+      })
+      return current
     })
 
     setPendingReservations((pending) => ({ ...pending, [requestKey]: true }))
@@ -494,8 +501,9 @@ export default function Home() {
         throw error
       }
       // Re-sync from the sheet shortly after the write so the local view
-      // always settles on what the backend actually stored.
-      setTimeout(() => refreshSchedule(true), 1000)
+      // always settles on what the backend actually stored. Use longer delay
+      // to allow Sheets to settle, but don't block UI.
+      setTimeout(() => refreshSchedule(true), 1500)
       return true
     } catch (e) {
       console.error('Failed saving reservation', e)
@@ -519,7 +527,7 @@ export default function Home() {
         return next
       })
     }
-  }
+  }, [pendingReservations, activeLocations, refreshSchedule])
 
   // Session-limit / approval evaluation used by the booking modal. It is
   // recomputed with the modal's CURRENT player list, so adding a player who is
@@ -545,7 +553,7 @@ export default function Home() {
     return { ok: true, warning: null, error: null }
   }, [bookingModal, reservations, activeLocations])
 
-  async function handleConfirmGroupBooking(players, opts = {}) {
+  const handleConfirmGroupBooking = useCallback(async (players, opts = {}) => {
     const modal = bookingModal
     if (!modal) return
     const slots = modal.slots
@@ -584,9 +592,9 @@ export default function Home() {
         setFindNotice(`Canceled the booking on Court ${modal.courtId} at ${LOCATION_SHORT[modal.location] || modal.location}.`)
       }
     }
-  }
+  }, [bookingModal, reservations, activeLocations, handleGroupWrite])
 
-  function openFindCourt() {
+  const openFindCourt = useCallback(() => {
     const preferred = selectedDay && isBookableDay(selectedDay)
       ? selectedDay
       : (bookableDays[0]?.key || '')
@@ -600,20 +608,23 @@ export default function Home() {
     setFindTime('')
     setFindNotice(null)
     setShowFindCourt(true)
-  }
+  }, [selectedDay, bookableDays, selectedLocation, activeLocations])
 
   // Find a Court result: open the group-booking dialog for the chosen court
   // (or the cancellation dialog when the current player already has a booking
-  // in the window).
-  function handleFindCourtPick(courtId) {
+  // in the window). Now allows shared occupancy up to 4 players.
+  const handleFindCourtPick = useCallback((courtId) => {
     if (!findDay || !isBookableDay(findDay)) {
       alert('Bookings are only available for today and tomorrow.')
       return
     }
-    const players = findSlots.flatMap((slot) => reservations[`${findLocation}|${findDay}|${courtId}`]?.[slot] || [])
-    const mine = players.includes(currentPlayer)
+    const slotPlayersList = findSlots.map((slot) => reservations[`${findLocation}|${findDay}|${courtId}`]?.[slot] || [])
+    const allPlayers = slotPlayersList.flat()
+    const mine = allPlayers.includes(currentPlayer)
+    const full = slotPlayersList.some((players) => players.length >= MAX_PLAYERS_PER_SLOT && !players.includes(currentPlayer))
+
     if (mine) {
-      const group = [...new Set(players)]
+      const group = [...new Set(allPlayers)]
       setBookingModal({
         origin: 'find',
         mode: 'cancel',
@@ -627,8 +638,8 @@ export default function Home() {
       })
       return
     }
-    if (players.length > 0) {
-      alert(`Court ${courtId} was just booked by someone else. Pick another court.`)
+    if (full) {
+      alert(`Court ${courtId} is fully booked (${MAX_PLAYERS_PER_SLOT}/${MAX_PLAYERS_PER_SLOT}) for that time. Pick another court.`)
       return
     }
     const validation = validateBooking({
@@ -657,19 +668,19 @@ export default function Home() {
       title: `Book Court ${courtId}`,
       subtitle: `${findLocation} · ${formatDateLong(dateKeyToLocalDate(findDay))}`,
     })
-  }
+  }, [findDay, findLocation, findSlots, reservations, currentPlayer, activeLocations])
 
   // Jumps from Find a Court to the full schedule for one court so the booking
   // can be viewed or adjusted.
-  function openCourtSchedule(location, dateKey, courtId) {
+  const openCourtSchedule = useCallback((location, dateKey, courtId) => {
     setSelectedLocation(location)
     setSelectedDay(dateKey)
     setSelectedCourt(courtId)
     setShowFindCourt(false)
-  }
+  }, [])
 
   // Called by the CourtSchedule modal when a slot is tapped.
-  function handleOpenBooking({ mode, slots, players, courtId, location, date }) {
+  const handleOpenBooking = useCallback(({ mode, slots, players, courtId, location, date }) => {
     const bookingCourt = courtId ?? selectedCourt
     const bookingLocation = location || selectedLocation
     const bookingDate = date || selectedDay
@@ -704,19 +715,19 @@ export default function Home() {
       title: mode === 'cancel' ? `Cancel Court ${bookingCourt}` : `Book Court ${bookingCourt}`,
       subtitle: `${bookingLocation} · ${formatDateLong(dateObj)}`,
     })
-  }
+  }, [selectedCourt, selectedLocation, selectedDay, viewOnlyDate, currentPlayer, reservations, activeLocations])
 
   // Add another location from the + button (only sites the Sheet already has a
   // court-grid tab for are offered). The choice is remembered in the browser.
-  const hiddenLocations = locations.filter((l) => !activeLocations.includes(l))
+  const hiddenLocations = useMemo(() => locations.filter((l) => !activeLocations.includes(l)), [locations, activeLocations])
 
-  function handleAddLocation(loc) {
+  const handleAddLocation = useCallback((loc) => {
     if (!loc) return
     setActiveLocations((prev) => (prev.includes(loc) ? prev : [...prev, loc]))
     setSelectedLocation(loc)
     setSelectedCourt(null)
     setShowAddLocation(false)
-  }
+  }, [])
 
   if (!mounted) {
     return (
@@ -951,7 +962,7 @@ export default function Home() {
             </div>
             <h2 className="text-xl font-bold text-slate-800">Information</h2>
           </div>
-          <p className="text-slate-600 leading-relaxed">Welcome to the USTA Girl&apos;s National Championships practice court scheduler. Use this page to book practice sessions at the selected venue for the tournament. A booking can include several players — the whole group is saved together.</p>
+          <p className="text-slate-600 leading-relaxed">Welcome to the USTA Girl&apos;s National Championships practice court scheduler. Use this page to book practice sessions at the selected venue for the tournament. A booking can include several players — the whole group is saved together. Each 30-minute slot holds up to 4 players.</p>
           <div className="mt-4 grid gap-3 sm:grid-cols-2">
             <div className="flex items-start gap-3 p-3 rounded-xl bg-slate-50">
               <div className="w-8 h-8 rounded-lg bg-emerald-100 flex items-center justify-center shrink-0">
@@ -959,7 +970,7 @@ export default function Home() {
               </div>
               <div>
                 <div className="text-sm font-semibold text-slate-700">How to book</div>
-                <div className="text-xs text-slate-500">Select a date &amp; location, then tap a court to reserve a time slot for one or more players. Bookings can only be made for today and tomorrow; other days are view only.</div>
+                <div className="text-xs text-slate-500">Select a date &amp; location, then tap a court to reserve a time slot for one or more players. Bookings can only be made for today and tomorrow; other days are view only. Each slot can hold up to 4 players — partially booked slots still show as open.</div>
               </div>
             </div>
             <div className="flex items-start gap-3 p-3 rounded-xl bg-slate-50">
@@ -968,7 +979,7 @@ export default function Home() {
               </div>
               <div>
                 <div className="text-sm font-semibold text-slate-700">Session limits</div>
-                <div className="text-xs text-slate-500">Max 2 practice sessions per player per day. Barnes offers 30-minute bookings only (each counts as one session); at other sites a 1-hour booking counts as one session. Back-to-back or close sessions need tournament staff approval.</div>
+                <div className="text-xs text-slate-500">Max 2 practice sessions per player per day. Barnes offers 30-minute bookings only (each counts as one session); at other sites a 1-hour booking counts as one session. Back-to-back or close sessions (within 1 hour) for the same player need tournament staff approval — a staff code prompt will appear when required.</div>
               </div>
             </div>
           </div>
@@ -996,7 +1007,7 @@ export default function Home() {
         </section>
 
         <footer className="mt-6 text-center text-xs text-slate-400 pb-4">
-          Click a court to view the schedule and reserve 30-minute slots for one or more players.
+          Click a court to view the schedule and reserve 30-minute slots for up to 4 players each.
         </footer>
       </div>
 
@@ -1150,7 +1161,7 @@ export default function Home() {
 
               {/* Step 4 — Available courts */}
               <div>
-                <div className="text-xs font-semibold uppercase tracking-wider text-slate-500 mb-2">4. Available courts</div>
+                <div className="text-xs font-semibold uppercase tracking-wider text-slate-500 mb-2">4. Available courts (up to 4 players per slot)</div>
                 {findSlots.length > 0 && (
                   <p className="mb-2 text-sm text-slate-600">
                     Looking for <span className="font-semibold text-slate-800">{findSlots[0].split('–')[0]} to {findSlots[findSlots.length - 1].split('–')[1]}</span>
@@ -1175,9 +1186,6 @@ export default function Home() {
                   <div className="space-y-2">
                     {findCourts.map((r) => {
                       const isMine = r.mine
-                      // Pending keys are "mode|location|date|court|slots|names"
-                      // (see handleGroupWrite); the names part varies once
-                      // extra players join a booking, so match by prefix.
                       const pendingPrefix = `${r.location}|${findDay}|${r.courtId}|${findSlots.join(',')}|`
                       const isSaving = Object.keys(pendingReservations).some(
                         (k) => k.startsWith(`book|${pendingPrefix}`) || k.startsWith(`cancel|${pendingPrefix}`)
@@ -1195,10 +1203,10 @@ export default function Home() {
                             disabled={isSaving}
                             className="flex-1 text-left"
                           >
-                            <div className="font-semibold text-slate-800">Court {r.courtId}</div>
+                            <div className="font-semibold text-slate-800">Court {r.courtId} {r.occupancy ? `(${r.occupancy}/4)` : ''}</div>
                             <div className="text-xs text-slate-500">{r.location}</div>
-                            <div className={`text-xs font-medium mt-1 ${isMine ? 'text-emerald-700' : 'text-slate-400'}`}>
-                              {isSaving ? 'Saving…' : isMine ? 'Booked by you — tap to manage' : `Open ${findSlots.length === 2 ? 'for 1 hour' : 'for 30 minutes'} — tap to book`}
+                            <div className={`text-xs font-medium mt-1 ${isMine ? 'text-emerald-700' : 'text-slate-500'}`}>
+                              {isSaving ? 'Saving…' : isMine ? 'Booked by you — tap to manage' : r.occupancy ? `${r.occupancy}/4 booked — tap to add yourself` : `Open ${findSlots.length === 2 ? 'for 1 hour' : 'for 30 minutes'} — tap to book`}
                             </div>
                           </button>
                           <button
@@ -1232,7 +1240,7 @@ export default function Home() {
         <CourtCardCarousel
           courts={courts}
           selectedCourt={selectedCourt}
-          onSelectCourt={setSelectedCourt}
+          onSelectCourt={handleSelectCourt}
           date={selectedDay}
           location={selectedLocation}
           reservations={reservations}
