@@ -1,5 +1,5 @@
-import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
-import { formatPlayerName, normalizeNameKey, resolveCanonicalName } from '../lib/schedule-display'
+import React, { useEffect, useId, useMemo, useRef, useState } from 'react'
+import { formatPlayerName } from '../lib/schedule-display'
 
 const APPEARANCE = {
   navbar: {
@@ -19,18 +19,13 @@ const APPEARANCE = {
   },
 }
 
-// A roster entry matches when the query appears in EITHER the canonical
-// "Last, First" Sheet value or the displayed "First Last" form. Both forms are
-// normalized first so stray punctuation, casing and double spaces never hide a
-// player who really is on the roster.
-function searchIndexFor(name) {
-  return `${normalizeNameKey(name)} \u0001 ${normalizeNameKey(formatPlayerName(name))}`
+function searchableName(name) {
+  return `${name} ${formatPlayerName(name)}`.toLowerCase()
 }
 
-// Shared identity picker used wherever the desk changes the player it is acting
-// for: the navbar, Find a Court, the court-schedule modal and the reservation
-// search. The value handed to onSelect is ALWAYS the untouched canonical roster
-// name; only the text shown to people is reformatted.
+// Shared identity picker used wherever the desk changes the player for whom it
+// is acting. The selected value passed to onSelect is always the untouched,
+// canonical roster name; only the text shown to people is reformatted.
 export default function PlayerSwitcher({
   currentPlayer,
   roster = [],
@@ -53,49 +48,29 @@ export default function PlayerSwitcher({
 
   useEffect(() => () => clearTimeout(blurTimer.current), [])
 
-  const searchable = useMemo(
-    () => roster.map((name) => ({ name, index: searchIndexFor(name) })),
-    [roster]
-  )
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase()
+    return roster.filter((name) => !q || searchableName(name).includes(q)).slice(0, 30)
+  }, [query, roster])
 
-  const matches = useMemo(() => {
-    const q = normalizeNameKey(query)
-    if (!q) return roster
-    return searchable.filter((entry) => entry.index.includes(q)).map((entry) => entry.name)
-  }, [query, roster, searchable])
+  const totalMatches = useMemo(() => {
+    const q = query.trim().toLowerCase()
+    return roster.filter((name) => !q || searchableName(name).includes(q)).length
+  }, [query, roster])
 
-  const filtered = useMemo(() => matches.slice(0, 30), [matches])
-
-  const choose = useCallback(
-    (name) => {
-      if (!name) return
-      // Always emit the canonical roster value, never the typed text.
-      onSelect?.(name)
-      setQuery(formatPlayerName(name))
-      setOpen(false)
-    },
-    [onSelect]
-  )
-
-  // Typed text is only a search term until it is committed. Committing accepts
-  // the first visible match, or — when the field was typed in full and then
-  // blurred — an exact canonical/display-form hit anywhere in the roster.
-  const commitTypedText = useCallback(() => {
-    const exact = resolveCanonicalName(query, roster)
-    if (exact) {
-      choose(exact)
-      return true
-    }
-    if (matches.length) {
-      choose(matches[0])
-      return true
-    }
-    // Nothing resolved: fall back to the current player so the field never
-    // shows a name that is not actually selected.
-    setQuery(formatPlayerName(currentPlayer))
+  function choose(name) {
+    if (!name) return
+    onSelect?.(name)
+    setQuery(formatPlayerName(name))
     setOpen(false)
-    return false
-  }, [query, roster, matches, choose, currentPlayer])
+  }
+
+  function openAndSelect(event) {
+    clearTimeout(blurTimer.current)
+    setQuery(formatPlayerName(currentPlayer))
+    setOpen(true)
+    event.currentTarget.select()
+  }
 
   return (
     <div className={`relative inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1.5 ${styles.root} ${className}`}>
@@ -108,40 +83,24 @@ export default function PlayerSwitcher({
           aria-expanded={open}
           aria-controls={listId}
           aria-autocomplete="list"
-          autoComplete="off"
-          autoCorrect="off"
-          autoCapitalize="off"
-          spellCheck={false}
           value={open ? query : formatPlayerName(currentPlayer)}
           onChange={(event) => {
             setQuery(event.target.value)
             setOpen(true)
           }}
-          onFocus={(event) => {
-            clearTimeout(blurTimer.current)
-            setQuery(formatPlayerName(currentPlayer))
-            setOpen(true)
-            event.currentTarget.select()
-          }}
+          onFocus={openAndSelect}
           onClick={(event) => event.currentTarget.select()}
           onBlur={() => {
-            // Delayed so a click/tap on a result still lands first (the result
-            // buttons also commit on mousedown/touchstart for mobile Safari).
-            blurTimer.current = setTimeout(() => {
-              if (open) commitTypedText()
-            }, 180)
+            blurTimer.current = setTimeout(() => setOpen(false), 150)
           }}
           onKeyDown={(event) => {
-            if (event.key === 'Enter') {
+            if (event.key === 'Enter' && filtered.length) {
               event.preventDefault()
-              commitTypedText()
+              choose(filtered[0])
             }
             if (event.key === 'Escape') {
-              // Escape closes only the dropdown; it must never bubble up and
-              // close the surrounding modal.
               event.preventDefault()
               event.stopPropagation()
-              setQuery(formatPlayerName(currentPlayer))
               setOpen(false)
             }
           }}
@@ -165,14 +124,8 @@ export default function PlayerSwitcher({
                     event.preventDefault()
                     choose(name)
                   }}
-                  onTouchStart={() => {
-                    clearTimeout(blurTimer.current)
-                  }}
-                  onClick={(event) => {
-                    event.preventDefault()
-                    choose(name)
-                  }}
-                  className={`w-full px-3 py-2.5 text-left text-sm transition hover:bg-emerald-50 ${name === currentPlayer ? 'bg-emerald-100 font-semibold text-emerald-800' : 'text-slate-700'}`}
+                  onClick={() => choose(name)}
+                  className={`w-full px-3 py-2 text-left text-sm transition hover:bg-emerald-50 ${name === currentPlayer ? 'bg-emerald-100 font-semibold text-emerald-800' : 'text-slate-700'}`}
                 >
                   {formatPlayerName(name)}
                 </button>
@@ -182,7 +135,7 @@ export default function PlayerSwitcher({
               )}
             </div>
             <div className="border-t border-slate-100 px-3 py-1.5 text-xs text-slate-400">
-              {matches.length} of {roster.length} players
+              {totalMatches} of {roster.length} players
             </div>
           </div>
         )}

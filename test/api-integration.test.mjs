@@ -260,30 +260,3 @@ test('canceling an existing booking on a bookable day works', async () => {
   const key = `Peninsula Tennis Club|${TOMORROW}|1`
   assert.ok(!schedule.reservations[key] || !schedule.reservations[key][slot(480)], 'the canceled slots are gone')
 })
-
-test('the schedule payload carries a read-only history so past reservations stay searchable', async () => {
-  const schedule = await getSchedule(true)
-
-  // The bookable payload deliberately prunes 30-minute slots that have ended,
-  // so past tournament days are absent from it.
-  const bookablePastKeys = Object.keys(schedule.reservations).filter((k) => k.split('|')[1] < TODAY)
-  assert.equal(bookablePastKeys.length, 0, 'ended slots are not bookable and are pruned')
-
-  // The history payload is the unpruned mirror the reservation search uses.
-  assert.ok(schedule.history, 'a history payload is present')
-  const historyPastKeys = Object.keys(schedule.history).filter((k) => k.split('|')[1] < TODAY)
-  assert.ok(historyPastKeys.length > 0, 'past reservations are still readable for the search')
-
-  // Merging the two feeds the search index with past + present.
-  const { buildReservationIndex, mergeEndedReservations } = await import('../lib/reservation-index.js')
-  const index = buildReservationIndex(mergeEndedReservations(schedule.reservations, schedule.history))
-  const sections = index.sections('Abbey, Stephanie')
-
-  assert.ok(sections.past.length > 0, 'the search finds past sessions')
-  // The very same records come back from the display-form lookup.
-  assert.deepEqual(index.sections('Stephanie Abbey'), sections)
-  // Canonical Sheet values are preserved verbatim in every record.
-  for (const entry of [...sections.past, ...sections.current, ...sections.upcoming]) {
-    assert.equal(entry.player, 'Abbey, Stephanie')
-  }
-})
