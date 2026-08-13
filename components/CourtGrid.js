@@ -1,6 +1,6 @@
 import React, { useMemo } from 'react'
 import PlayerChip from './PlayerChip'
-import { EMPTY_RESERVATION_INDEX } from '../lib/reservation-index'
+import { courtSessionBlocks } from '../lib/schedule-display'
 
 function CourtGraphic({ highlight, gradientId }) {
   return (
@@ -56,20 +56,18 @@ function SessionPreview({ blocks, completedSlots }) {
   )
 }
 
-// `index` is the single memoized reservation index built in pages/index.js.
-// The grid never re-scans the reservations object itself.
-export default function CourtGrid({ courts, index = EMPTY_RESERVATION_INDEX, onSelect, selectedCourt, completedSlots = null }) {
+export default function CourtGrid({ courts, reservations, onSelect, selectedCourt, completedSlots = null }) {
   const blocksByCourt = useMemo(() => {
     const grouped = new Map()
     courts.forEach((court) => {
-      grouped.set(String(court.id), index.blocksFor({
-        date: court.date,
+      grouped.set(String(court.id), courtSessionBlocks(reservations, {
+        dateKey: court.date,
         location: court.location,
         court: court.id,
       }))
     })
     return grouped
-  }, [courts, index])
+  }, [courts, reservations])
 
   const rows = []
   for (let i = 0; i < courts.length; i += 3) rows.push(courts.slice(i, i + 3))
