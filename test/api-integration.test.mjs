@@ -1,5 +1,5 @@
 // End-to-end tests of the Next.js API routes against the local mock of the
-// v2.1 Apps Script backend (scripts/mock-apps-script.mjs). The mock's grid is
+// v2.2 Apps Script backend (scripts/mock-apps-script.mjs). The mock's grid is
 // generated relative to today (America/Los_Angeles): two past days, today,
 // tomorrow (bookable) and the day after tomorrow (view-only).
 //
@@ -17,12 +17,14 @@ const MOCK_PORT = 30000 + Math.floor(Math.random() * 1000)
 
 // Must be set before the API modules (and lib/sheets.js) are imported.
 process.env.SHEETS_WEBAPP_URL = `http://127.0.0.1:${MOCK_PORT}/exec`
+const STAFF_CODE = 'integration-staff-code'
+process.env.STAFF_APPROVAL_CODE = STAFF_CODE
 delete process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL
 delete process.env.GOOGLE_PRIVATE_KEY
 
 const { default: reservationsHandler } = await import('../pages/api/reservations.js')
 const { default: scheduleHandler } = await import('../pages/api/schedule.js')
-const { laNow, addDaysToDateKey } = await import('../lib/booking-rules.js')
+const { laNow, addDaysToDateKey, isSlotCompleted } = await import('../lib/booking-rules.js')
 
 const TODAY = laNow().dateKey
 const TOMORROW = addDaysToDateKey(TODAY, 1)
@@ -99,6 +101,15 @@ function post(action, payload) {
   return callApi(reservationsHandler, { method: 'POST', body: { action, ...payload } })
 }
 
+async function postDirectlyToMock(payload) {
+  const response = await fetch(process.env.SHEETS_WEBAPP_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+    body: JSON.stringify(payload),
+  })
+  return { statusCode: response.status, body: await response.json() }
+}
+
 async function getSchedule(forceRefresh = false) {
   const res = await callApi(scheduleHandler, { method: 'GET', query: forceRefresh ? { refresh: '1' } : {} })
   assert.equal(res.statusCode, 200, 'schedule read should succeed')
@@ -111,7 +122,8 @@ test('schedule API reports every location, defaults, days and practice sessions'
   await startMock()
   const schedule = await getSchedule()
   assert.equal(schedule.connected, true)
-  assert.equal(schedule.scriptVersion, '2.1.1')
+  assert.equal(schedule.scriptVersion, '2.2')
+  assert.equal(schedule.staffCodeRequired, true)
   for (const loc of ['Barnes Tennis Center', 'Peninsula Tennis Club', 'Point Loma Nazarene College', 'Pacific Beach Tennis Club', 'Balboa Tennis Center', 'USD']) {
     assert.ok(schedule.locations.includes(loc), `${loc} should be reported`)
   }
@@ -121,6 +133,20 @@ test('schedule API reports every location, defaults, days and practice sessions'
   }
   assert.ok(schedule.practiceSessions[TOMORROW])
   assert.ok(schedule.practiceSessions[TOMORROW]['Peninsula Tennis Club'])
+
+  // Regression: v2.1 deleted every completed slot before returning the
+  // schedule, which erased every reservation on a past day and earlier today.
+  const pastKey = `Peninsula Tennis Club|${PAST}|1`
+  assert.deepEqual(schedule.reservations[pastKey][slot(480)], ['Waters, Eadan'])
+
+  const todayKey = `Point Loma Nazarene College|${TODAY}|1`
+  assert.equal(isSlotCompleted(TODAY, slot(480)), true, 'the seeded 8:00 AM slot should have ended today')
+  assert.deepEqual(schedule.reservations[todayKey][slot(480)], ['Reeves, Sam'])
+  assert.ok(
+    schedule.practiceSessions[TODAY]['Point Loma Nazarene College']
+      .some((session) => session.player === 'Reeves, Sam' && session.slots.includes(slot(480))),
+    "today's ended reservation should still count in practice-session metadata",
+  )
 })
 
 test('view-only days are rejected by the API for both book and cancel', async () => {
@@ -167,9 +193,46 @@ test('Barnes adjacent 30-minute bookings need staff approval; the hard 2-session
   })
   assert.equal(secondNoApproval.statusCode, 409)
   assert.equal(secondNoApproval.body.code, 'STAFF_APPROVAL_REQUIRED')
+  assert.equal(secondNoApproval.body.staffCodeRequired, true)
   assert.match(secondNoApproval.body.error, /staff approval is required/i)
 
-  // With explicit staff approval the second (back-to-back) session is allowed.
+  // A caller cannot self-assert staff approval when a code is configured.
+  const secondMissingCode = await post('book', {
+    location: 'Barnes Tennis Center',
+    date: TOMORROW,
+    courtId: 6,
+    slots: [slot(510)],
+    names: [player],
+    staffApproved: true,
+  })
+  assert.equal(secondMissingCode.statusCode, 403)
+  assert.equal(secondMissingCode.body.code, 'STAFF_APPROVAL_CODE_REQUIRED')
+
+  const directMissingCode = await postDirectlyToMock({
+    action: 'bookGroup',
+    location: 'Barnes Tennis Center',
+    date: TOMORROW,
+    courtId: 6,
+    slots: [slot(510)],
+    names: [player],
+    staffApproved: true,
+  })
+  assert.equal(directMissingCode.statusCode, 403)
+  assert.equal(directMissingCode.body.code, 'STAFF_APPROVAL_CODE_REQUIRED')
+
+  const secondWrongCode = await post('book', {
+    location: 'Barnes Tennis Center',
+    date: TOMORROW,
+    courtId: 6,
+    slots: [slot(510)],
+    names: [player],
+    staffApproved: true,
+    staffCode: 'wrong-code',
+  })
+  assert.equal(secondWrongCode.statusCode, 403)
+  assert.equal(secondWrongCode.body.code, 'STAFF_APPROVAL_CODE_INVALID')
+
+  // With the matching staff code the second (back-to-back) session is allowed.
   const secondApproved = await post('book', {
     location: 'Barnes Tennis Center',
     date: TOMORROW,
@@ -177,6 +240,7 @@ test('Barnes adjacent 30-minute bookings need staff approval; the hard 2-session
     slots: [slot(510)],
     names: [player],
     staffApproved: true,
+    staffCode: STAFF_CODE,
   })
   assert.equal(secondApproved.statusCode, 200, JSON.stringify(secondApproved.body))
 
@@ -188,6 +252,7 @@ test('Barnes adjacent 30-minute bookings need staff approval; the hard 2-session
     slots: [slot(540)],
     names: [player],
     staffApproved: true,
+    staffCode: STAFF_CODE,
   })
   assert.equal(third.statusCode, 409)
   assert.equal(third.body.code, 'SESSION_LIMIT')
@@ -223,9 +288,70 @@ test('a 60-minute non-Barnes booking counts as ONE session and needs no staff ap
     slots: [slot(720), slot(750)],
     names: [player],
     staffApproved: true,
+    staffCode: STAFF_CODE,
   })
   assert.equal(thirdHour.statusCode, 409)
   assert.equal(thirdHour.body.code, 'SESSION_LIMIT')
+})
+
+test('legacy toggle-add enforces the session limit while toggle-remove still works', async () => {
+  const player = 'Waters, Eadan'
+  for (const start of [480, 600]) {
+    const booked = await post('book', {
+      location: 'Barnes Tennis Center',
+      date: TOMORROW,
+      courtId: 5,
+      slots: [slot(start)],
+      names: [player],
+    })
+    assert.equal(booked.statusCode, 200, JSON.stringify(booked.body))
+  }
+
+  // Omitting `action` exercises the legacy single-player toggle route. This
+  // would previously validate as cancel even though it was adding a booking.
+  const overLimitAdd = await post(undefined, {
+    location: 'Barnes Tennis Center',
+    date: TOMORROW,
+    courtId: 5,
+    slot: slot(690),
+    name: player,
+  })
+  assert.equal(overLimitAdd.statusCode, 409)
+  assert.equal(overLimitAdd.body.code, 'SESSION_LIMIT')
+
+  // Old cached clients call Apps Script directly, so the locked backend must
+  // independently make the same add-vs-remove decision.
+  const directOverLimitAdd = await postDirectlyToMock({
+    action: 'toggleReservation',
+    location: 'Barnes Tennis Center',
+    date: TOMORROW,
+    courtId: 5,
+    slot: slot(690),
+    name: player,
+  })
+  assert.equal(directOverLimitAdd.statusCode, 409)
+  assert.equal(directOverLimitAdd.body.code, 'SESSION_LIMIT')
+
+  let schedule = await getSchedule(true)
+  const key = `Barnes Tennis Center|${TOMORROW}|5`
+  assert.equal(schedule.reservations[key]?.[slot(690)], undefined, 'rejected toggle-add must not reach the backend')
+
+  const legitimateRemove = await post(undefined, {
+    location: 'Barnes Tennis Center',
+    date: TOMORROW,
+    courtId: 5,
+    slot: slot(600),
+    name: player,
+    // A cancellation must not require an approval code, even if a stale old
+    // client happens to send staffApproved.
+    staffApproved: true,
+  })
+  assert.equal(legitimateRemove.statusCode, 200, JSON.stringify(legitimateRemove.body))
+  assert.equal(legitimateRemove.body.action, 'cancel')
+
+  schedule = await getSchedule(true)
+  assert.equal(schedule.reservations[key]?.[slot(600)], undefined)
+  assert.deepEqual(schedule.reservations[key]?.[slot(480)], [player])
 })
 
 test('schedule read reflects the stored bookings and groups the 60-minute booking into ONE session', async () => {

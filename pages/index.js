@@ -209,6 +209,7 @@ export default function Home() {
   const [findNotice, setFindNotice] = useState(null)
   const [bookingModal, setBookingModal] = useState(null) // {mode, courtId, slots, players, title, subtitle}
   const [sheetsConnected, setSheetsConnected] = useState(null) // null = still loading/unknown
+  const [staffCodeRequired, setStaffCodeRequired] = useState(false)
   const lastScheduleSync = useRef(0)
 
   useEffect(() => {
@@ -252,6 +253,7 @@ export default function Home() {
         })
       }
       setSheetsConnected(result.connected === true)
+      setStaffCodeRequired(result.staffCodeRequired === true)
       return true
     } catch (e) {
       console.warn('Unable to load schedule from the server', e)
@@ -415,7 +417,7 @@ export default function Home() {
   // The optimistic UI change is applied immediately, then the whole group is
   // written to the sheet in one request; on failure every name is rolled back
   // so a half-saved group is never shown or stored.
-  async function handleGroupWrite({ mode, location, date, courtId, slots, names, staffApproved = false }) {
+  async function handleGroupWrite({ mode, location, date, courtId, slots, names, staffApproved = false, staffCode = null }) {
     const reservationKey = `${location}|${date}|${courtId}`
     const requestKey = `${mode}|${reservationKey}|${slots.join(',')}|${names.join(',')}`
     if (pendingReservations[requestKey]) return
@@ -452,20 +454,25 @@ export default function Home() {
       const response = await fetch('/api/reservations', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: mode, location, date, courtId, slots, names, staffApproved, practiceLocations: activeLocations }),
+        body: JSON.stringify({ action: mode, location, date, courtId, slots, names, staffApproved, staffCode, practiceLocations: activeLocations }),
       })
       if (!response.ok) {
         let message = 'Unable to save reservation'
         let code = null
+        let staffCodeRequired = false
         try {
           const body = await response.json()
           if (body?.error) message = body.error.replace(/^Error:\s*/i, '')
           code = body?.code || null
+          staffCodeRequired = body?.staffCodeRequired === true
         } catch {}
         if (code === 'STAFF_APPROVAL_REQUIRED') {
-          throw new Error('Tournament staff approval is required for this booking. Confirm the approval step and try again.')
+          message = 'Tournament staff approval is required for this booking. Confirm the approval step and try again.'
         }
-        throw new Error(message)
+        const error = new Error(message)
+        error.code = code
+        error.staffCodeRequired = staffCodeRequired
+        throw error
       }
       // Re-sync from the sheet shortly after the write so the local view
       // always settles on what the backend actually stored.
@@ -526,6 +533,7 @@ export default function Home() {
     // Keep only players that are still relevant (all of them for a booking).
     const names = [...new Set(players.map((n) => String(n).trim()).filter(Boolean))]
     const staffApproved = Boolean(opts.staffApproved)
+    const staffCode = opts.staffCode || null
 
     const validation = validateBooking({
       action: modal.mode,
@@ -544,7 +552,7 @@ export default function Home() {
     }
 
     if (modal.mode === 'book') {
-      await handleGroupWrite({ mode: 'book', location: modal.location, date: modal.date, courtId: modal.courtId, slots, names, staffApproved })
+      await handleGroupWrite({ mode: 'book', location: modal.location, date: modal.date, courtId: modal.courtId, slots, names, staffApproved, staffCode })
       setBookingModal(null)
       if (modal.origin === 'find') {
         setFindNotice(`Booked Court ${modal.courtId} at ${LOCATION_SHORT[modal.location] || modal.location} for ${slots.join(' and ')}.`)
@@ -1239,6 +1247,7 @@ export default function Home() {
           roster={roster}
           mode={bookingModal.mode}
           evaluate={evaluateBookingRules}
+          requiresStaffCode={staffCodeRequired}
           onConfirm={handleConfirmGroupBooking}
           onClose={() => setBookingModal(null)}
         />

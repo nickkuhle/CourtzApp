@@ -14,7 +14,10 @@ export default async function handler(req, res) {
     // worker's memory cache is not enough.
     const schedule = await getSchedule({ forceRefresh: req.query.refresh === '1' })
     res.setHeader('Cache-Control', 'private, max-age=0, must-revalidate')
-    return res.status(200).json(schedule)
+    // Expose only whether the server requires a code (never the code itself),
+    // so the staff-approval modal can ask for it before attempting the write.
+    const staffCodeRequired = Boolean(String(process.env.STAFF_APPROVAL_CODE || '').trim())
+    return res.status(200).json({ ...schedule, staffCodeRequired })
   } catch (error) {
     console.error(error)
     return res.status(500).json({ error: 'Unable to load the schedule.' })

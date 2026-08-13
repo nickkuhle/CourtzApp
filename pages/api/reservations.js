@@ -6,12 +6,65 @@ import { validateBooking } from '../../lib/booking-rules.js'
 // same rules under its write lock before touching the Sheet, so a stale
 // browser can never sneak past them either.
 
+let warnedAboutUnprotectedStaffApproval = false
+
+function configuredStaffApprovalCode() {
+  return String(process.env.STAFF_APPROVAL_CODE || '').trim()
+}
+
+function warnAboutUnprotectedStaffApprovalOnce() {
+  if (warnedAboutUnprotectedStaffApproval) return
+  warnedAboutUnprotectedStaffApproval = true
+  console.warn('STAFF_APPROVAL_CODE is not set; staffApproved requests are not protected by a staff code.')
+}
+
+// Returns the approval value that may be passed into the mirrored booking
+// rules. A caller-provided `staffApproved: true` is ignored unless it carries
+// the configured code. Leaving STAFF_APPROVAL_CODE unset preserves the
+// pre-code tournament behavior, but emits one server-side warning.
+function authorizeStaffApproval({ staffApproved, staffCode }, res) {
+  if (!staffApproved) return false
+  const configuredCode = configuredStaffApprovalCode()
+  if (!configuredCode) {
+    warnAboutUnprotectedStaffApprovalOnce()
+    return true
+  }
+  if (!String(staffCode || '').trim()) {
+    res.status(403).json({
+      error: 'A tournament staff approval code is required.',
+      code: 'STAFF_APPROVAL_CODE_REQUIRED',
+      staffCodeRequired: true,
+    })
+    return null
+  }
+  if (String(staffCode).trim() !== configuredCode) {
+    res.status(403).json({
+      error: 'The tournament staff approval code is incorrect.',
+      code: 'STAFF_APPROVAL_CODE_INVALID',
+      staffCodeRequired: true,
+    })
+    return null
+  }
+  return true
+}
+
 function requireRulesOrFail(validation, res) {
   if (validation.ok) return true
   if (validation.isSessionLimitError) {
     return res.status(409).json({ error: validation.error, code: 'SESSION_LIMIT' }) && false
   }
   return res.status(400).json({ error: validation.error, code: 'BOOKING_RULES' }) && false
+}
+
+function staffApprovalRequired(res, warnings) {
+  const staffCodeRequired = Boolean(configuredStaffApprovalCode())
+  if (!staffCodeRequired) warnAboutUnprotectedStaffApprovalOnce()
+  return res.status(409).json({
+    error: 'This booking is within one hour of another practice session. Tournament staff approval is required to continue.',
+    code: 'STAFF_APPROVAL_REQUIRED',
+    staffCodeRequired,
+    warnings,
+  })
 }
 
 export default async function handler(req, res) {
@@ -27,7 +80,7 @@ export default async function handler(req, res) {
 
   if (req.method === 'POST') {
     const body = req.body || {}
-    const { action, location, date, courtId, slot, slots, name, names, staffApproved, practiceLocations } = body
+    const { action, location, date, courtId, slot, slots, name, names, staffApproved, staffCode, practiceLocations } = body
     if (!location || !date || !courtId) {
       return res.status(400).json({ error: 'Missing reservation payload.' })
     }
@@ -43,6 +96,11 @@ export default async function handler(req, res) {
         // Re-read the current reservations so a stale browser view cannot hide
         // sessions that were booked in the meantime.
         const reservations = await readReservations()
+        const effectiveStaffApproval = action === 'book'
+          ? authorizeStaffApproval({ staffApproved: Boolean(staffApproved), staffCode }, res)
+          : false
+        if (effectiveStaffApproval === null) return
+
         const validation = validateBooking({
           action,
           location,
@@ -50,61 +108,98 @@ export default async function handler(req, res) {
           courtId,
           slots: slotList,
           names: nameList,
-          staffApproved: Boolean(staffApproved),
+          staffApproved: effectiveStaffApproval,
           reservations,
           practiceLocations,
         })
         if (!requireRulesOrFail(validation, res)) return
 
-        if (action === 'book' && validation.warnings.length && !staffApproved) {
+        if (action === 'book' && validation.warnings.length && !effectiveStaffApproval) {
           // The close-timing warning: booking is only possible with explicit
           // tournament-staff approval. The hard session limit is checked above
           // and can never be bypassed.
-          return res.status(409).json({
-            error: 'This booking is within one hour of another practice session. Tournament staff approval is required to continue.',
-            code: 'STAFF_APPROVAL_REQUIRED',
-            warnings: validation.warnings,
-          })
+          return staffApprovalRequired(res, validation.warnings)
         }
 
         if (action === 'book') {
-          await bookGroup({ location, date, courtId, slots: slotList, names: nameList, staffApproved: Boolean(staffApproved), practiceLocations })
+          await bookGroup({
+            location,
+            date,
+            courtId,
+            slots: slotList,
+            names: nameList,
+            staffApproved: effectiveStaffApproval,
+            staffCode,
+            practiceLocations,
+          })
         } else {
-          await cancelGroup({ location, date, courtId, slots: slotList, names: nameList, staffApproved: Boolean(staffApproved), practiceLocations })
+          await cancelGroup({ location, date, courtId, slots: slotList, names: nameList, practiceLocations })
         }
         return res.status(200).json({ success: true, action, warnings: validation.warnings })
       }
 
-      // Legacy single-player toggle
+      // Legacy single-player toggle. Determine whether this exact player is
+      // already stored before choosing the validation action: removals use the
+      // cancellation rules, while additions must pass every booking rule.
       if (!slot || !name) {
         return res.status(400).json({ error: 'Missing reservation payload.' })
       }
-      // A toggle can be either a booking or a cancellation, so only the
-      // booking-window rules (date + ended slots) are applied here.
       const reservations = await readReservations()
+      const reservationKey = `${location}|${date}|${courtId}`
+      const currentValue = reservations[reservationKey]?.[slot]
+      const currentNames = Array.isArray(currentValue) ? currentValue : (currentValue ? [currentValue] : [])
+      const toggleAction = currentNames.map((n) => String(n).trim()).includes(String(name).trim()) ? 'cancel' : 'book'
+      const effectiveStaffApproval = toggleAction === 'book'
+        ? authorizeStaffApproval({ staffApproved: Boolean(staffApproved), staffCode }, res)
+        : false
+      if (effectiveStaffApproval === null) return
+
       const validation = validateBooking({
-        action: 'cancel',
+        action: toggleAction,
         location,
         date,
         courtId,
         slots: [slot],
         names: [name],
-        staffApproved: Boolean(staffApproved),
+        staffApproved: effectiveStaffApproval,
         reservations,
         practiceLocations,
       })
       if (!requireRulesOrFail(validation, res)) return
-      await toggleReservation({ location, date, courtId, slot, name, staffApproved: Boolean(staffApproved), practiceLocations })
+      if (toggleAction === 'book' && validation.warnings.length && !effectiveStaffApproval) {
+        return staffApprovalRequired(res, validation.warnings)
+      }
+
+      await toggleReservation({
+        location,
+        date,
+        courtId,
+        slot,
+        name,
+        staffApproved: effectiveStaffApproval,
+        staffCode,
+        practiceLocations,
+      })
       // The client updates this one slot optimistically. Returning the entire
       // schedule here used to make every booking wait on a full Sheets re-read.
-      return res.status(200).json({ success: true })
+      return res.status(200).json({ success: true, action: toggleAction })
     } catch (error) {
       console.error(error)
       if (error && error.code === 'STAFF_APPROVAL_REQUIRED') {
-        return res.status(409).json({ error: error.message, code: 'STAFF_APPROVAL_REQUIRED' })
+        return res.status(409).json({
+          error: error.message,
+          code: 'STAFF_APPROVAL_REQUIRED',
+          staffCodeRequired: Boolean(configuredStaffApprovalCode()),
+        })
+      }
+      if (error && (error.code === 'STAFF_APPROVAL_CODE_REQUIRED' || error.code === 'STAFF_APPROVAL_CODE_INVALID')) {
+        return res.status(403).json({ error: error.message, code: error.code, staffCodeRequired: true })
       }
       if (error && error.code === 'SESSION_LIMIT') {
         return res.status(409).json({ error: error.message, code: 'SESSION_LIMIT' })
+      }
+      if (error && error.code === 'BOOKING_RULES') {
+        return res.status(400).json({ error: error.message, code: 'BOOKING_RULES' })
       }
       return res.status(500).json({ error: error.message || 'Unable to save reservation.' })
     }

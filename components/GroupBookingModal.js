@@ -51,6 +51,7 @@ export default function GroupBookingModal({
   mode = 'book', // 'book' | 'cancel'
   confirmLabel,
   evaluate = null,
+  requiresStaffCode = false,
   onConfirm,
   onClose,
   busy = false,
@@ -61,6 +62,8 @@ export default function GroupBookingModal({
   const [error, setError] = useState(null)
   const [saving, setSaving] = useState(false)
   const [staffStep, setStaffStep] = useState(false)
+  const [staffCodeRequired, setStaffCodeRequired] = useState(Boolean(requiresStaffCode))
+  const [staffCode, setStaffCode] = useState('')
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase()
@@ -116,10 +119,17 @@ export default function GroupBookingModal({
     setSaving(true)
     setError(null)
     try {
-      await onConfirm(players, { staffApproved })
+      await onConfirm(players, { staffApproved, staffCode: staffApproved ? staffCode : null })
       // Parent closes the modal on success; keep it open on failure so the desk
       // can retry or adjust the group.
     } catch (e) {
+      if (e?.staffCodeRequired || e?.code === 'STAFF_APPROVAL_CODE_REQUIRED' || e?.code === 'STAFF_APPROVAL_CODE_INVALID') {
+        // The server is the source of truth for whether approval is protected.
+        // Keep the selected players and all booking fields intact while staff
+        // enters or corrects the code.
+        setStaffCodeRequired(true)
+        setStaffStep(true)
+      }
       setError(e?.message || 'The booking could not be saved. Please try again.')
     } finally {
       setSaving(false)
@@ -173,6 +183,35 @@ export default function GroupBookingModal({
               <span className="font-semibold text-slate-800">{subtitle}</span> for{' '}
               <span className="font-semibold text-slate-800">{players.map(formatPlayerName).join(', ')}</span>.
             </div>
+            {staffCodeRequired && (
+              <div>
+                <label htmlFor="staff-approval-code" className="block text-xs font-semibold uppercase tracking-wider text-slate-600 mb-2">
+                  Staff approval code
+                </label>
+                <input
+                  id="staff-approval-code"
+                  type="password"
+                  autoComplete="off"
+                  autoFocus
+                  value={staffCode}
+                  onChange={(event) => { setStaffCode(event.target.value); setError(null) }}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter' && staffCode.trim() && !saving && !busy) {
+                      event.preventDefault()
+                      runConfirm(true)
+                    }
+                  }}
+                  placeholder="Enter the tournament staff code"
+                  className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2.5 text-sm text-slate-800 focus:border-amber-500 focus:outline-none focus:ring-2 focus:ring-amber-200"
+                />
+                <p className="mt-1.5 text-xs text-slate-500">Ask tournament staff for the approval code, then try again.</p>
+              </div>
+            )}
+            {error && (
+              <div className="rounded-xl border border-red-200 bg-red-50 px-3 py-2.5 text-sm text-red-700" role="alert">
+                {error}
+              </div>
+            )}
             <div className="flex items-center justify-end gap-3">
               <button
                 type="button"
@@ -185,10 +224,10 @@ export default function GroupBookingModal({
               <button
                 type="button"
                 onClick={() => runConfirm(true)}
-                disabled={busy || saving}
+                disabled={busy || saving || (staffCodeRequired && !staffCode.trim())}
                 className="rounded-xl px-4 py-2.5 text-sm font-bold text-white bg-amber-600 hover:bg-amber-700 shadow-sm shadow-amber-600/20 transition disabled:opacity-60"
               >
-                {saving ? 'Saving…' : 'Confirm — staff approved'}
+                {saving ? 'Saving…' : staffCodeRequired ? 'Verify code and confirm' : 'Confirm — staff approved'}
               </button>
             </div>
           </div>
