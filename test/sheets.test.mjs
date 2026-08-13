@@ -26,10 +26,24 @@ afterEach(() => {
 
 test('loads reservations, roster, dates and courts from the supplied Apps Script URL', async () => {
   delete process.env.SHEETS_WEBAPP_URL
-  let requestedUrl = ''
+  const requestedUrls = []
   global.fetch = async (url, options) => {
-    requestedUrl = String(url)
+    requestedUrls.push(String(url))
     assert.equal(options.cache, 'no-store')
+    // The unpruned history read uses the SAME script's existing read-only
+    // `getAll` action, so past (ended) reservations stay searchable.
+    if (String(url).includes('action=getAll')) {
+      return jsonResponse({
+        success: true,
+        version: '2.0',
+        roster: ['Abbey, Stephanie'],
+        reservations: {
+          'Barnes Tennis Center|2026-08-11|4': {
+            '8:00 AM–8:30 AM': ['Abbey, Stephanie', 'Andreoli, Mia'],
+          },
+        },
+      })
+    }
     return jsonResponse({
       success: true,
       version: '2.0',
@@ -57,8 +71,10 @@ test('loads reservations, roster, dates and courts from the supplied Apps Script
   const { getSchedule } = await loadFreshSheetsModule('read')
   const schedule = await getSchedule()
 
-  assert.match(requestedUrl, /AKfycbzlHIg__YqQdq9ohWvFdu9wCZZ27S5XPTYeBCV3y9IdDx1AZmZjs7vaV3rcZVz2lFaW6g/)
-  assert.match(requestedUrl, /action=getSchedule/)
+  assert.ok(requestedUrls.every((u) => u.includes('AKfycbzlHIg__YqQdq9ohWvFdu9wCZZ27S5XPTYeBCV3y9IdDx1AZmZjs7vaV3rcZVz2lFaW6g')))
+  assert.ok(requestedUrls.some((u) => /action=getSchedule/.test(u)), 'the bookable schedule is read')
+  assert.ok(requestedUrls.some((u) => /action=getAll/.test(u)), 'the ended-slot history is read read-only')
+  assert.ok(schedule.reservationHistory, 'history is exposed for the reservation search')
   assert.equal(schedule.connected, true)
   assert.equal(schedule.source, 'webapp')
   assert.equal(schedule.scriptVersion, '2.0')

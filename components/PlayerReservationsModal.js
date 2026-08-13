@@ -1,11 +1,12 @@
 import React, { useEffect, useMemo, useState } from 'react'
 import PlayerChip from './PlayerChip'
 import PlayerSwitcher from './PlayerSwitcher'
-import { formatPlayerName, playerReservationSections } from '../lib/schedule-display'
+import { EMPTY_RESERVATION_INDEX } from '../lib/reservation-index'
+import { formatPlayerName } from '../lib/player-names'
 
 const SECTION_META = [
-  { key: 'past', title: 'Past', description: 'Previous tournament days' },
-  { key: 'current', title: 'Current', description: 'Today in San Diego' },
+  { key: 'past', title: 'Past', description: 'Earlier tournament days' },
+  { key: 'current', title: 'Current / today', description: 'Today in San Diego' },
   { key: 'upcoming', title: 'Upcoming', description: 'Tomorrow and later dates' },
 ]
 
@@ -45,7 +46,7 @@ function ReservationEntry({ entry }) {
         <div className="text-right">
           <div className="text-base font-bold text-[#1f5f99]">{entry.timeRange}</div>
           <div className="mt-1 text-[11px] text-slate-400">
-            {entry.slots.length === 2 ? '60-minute session' : '30-minute session'}
+            {entry.minutes === 60 ? '60-minute session' : '30-minute session'}
           </div>
         </div>
       </div>
@@ -67,11 +68,28 @@ function ReservationEntry({ entry }) {
   )
 }
 
-export default function PlayerReservationsModal({ reservations, roster, initialPlayer, onClose }) {
+// Reservation search. The selected value is ALWAYS a canonical Sheet name; the
+// shared PlayerSwitcher only ever hands back a real roster entry, and the
+// memoized reservation index resolves both `Last, First` and `First Last` (and
+// any case/whitespace variant) back to the same canonical records.
+export default function PlayerReservationsModal({
+  reservationIndex = EMPTY_RESERVATION_INDEX,
+  roster = [],
+  initialPlayer,
+  onClose,
+}) {
   const [selectedPlayer, setSelectedPlayer] = useState(initialPlayer)
+
+  // Players the roster does not list (e.g. a name only present in the court
+  // grid) stay searchable, so a known reservation is never invisible.
+  const searchRoster = useMemo(() => {
+    const seen = new Set(roster)
+    return [...roster, ...reservationIndex.players.filter((p) => !seen.has(p))]
+  }, [roster, reservationIndex])
+
   const sections = useMemo(
-    () => playerReservationSections(reservations, selectedPlayer),
-    [reservations, selectedPlayer]
+    () => reservationIndex.sectionsForPlayer(selectedPlayer),
+    [reservationIndex, selectedPlayer]
   )
   const total = sections.past.length + sections.current.length + sections.upcoming.length
 
@@ -107,7 +125,7 @@ export default function PlayerReservationsModal({ reservations, roster, initialP
           <div className="flex flex-wrap items-center justify-between gap-3">
             <PlayerSwitcher
               currentPlayer={selectedPlayer}
-              roster={roster}
+              roster={searchRoster}
               onSelect={setSelectedPlayer}
               label="Reservations For"
               appearance="light"
@@ -117,6 +135,13 @@ export default function PlayerReservationsModal({ reservations, roster, initialP
             <div className="text-sm text-slate-500">
               <span className="font-bold text-slate-800">{total}</span> reservation session{total === 1 ? '' : 's'}
             </div>
+          </div>
+          {/* Explicit selected-player state so it is always obvious whose
+              reservations are on screen. */}
+          <div className="mt-3 flex flex-wrap items-center gap-2 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2">
+            <span className="text-[11px] font-bold uppercase tracking-wide text-slate-400">Showing</span>
+            <PlayerChip name={selectedPlayer} />
+            <span className="text-xs text-slate-400">Searchable as “{selectedPlayer}” or “{formatPlayerName(selectedPlayer)}”</span>
           </div>
         </div>
 

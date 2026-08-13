@@ -260,3 +260,55 @@ test('canceling an existing booking on a bookable day works', async () => {
   const key = `Peninsula Tennis Club|${TOMORROW}|1`
   assert.ok(!schedule.reservations[key] || !schedule.reservations[key][slot(480)], 'the canceled slots are gone')
 })
+
+// --- Reservation search (Fix 2) ---------------------------------------------
+// The v2.1 Apps Script strips 30-minute slots that have already ENDED from its
+// getSchedule payload, so a player's PAST reservations were missing entirely
+// from the search. The schedule API now also reads the script's existing,
+// read-only `getAll` action and exposes those completed slots as
+// `reservationHistory`, which the client merges for display only.
+
+test('the schedule payload exposes ended reservations so past sessions stay searchable', async () => {
+  const { buildReservationIndex, mergeCompletedHistory } = await import('../lib/reservation-index.js')
+  const schedule = await getSchedule(true)
+
+  // getSchedule alone contains no past dates at all — this was the root cause.
+  const liveDates = new Set(Object.keys(schedule.reservations).map((k) => k.split('|')[1]))
+  assert.ok(![...liveDates].some((d) => d < TODAY), 'ended/past slots are pruned by the Apps Script')
+
+  assert.ok(schedule.reservationHistory, 'the unpruned history is returned')
+  const historyDates = new Set(Object.keys(schedule.reservationHistory).map((k) => k.split('|')[1]))
+  assert.ok([...historyDates].some((d) => d < TODAY), 'the history still has past dates')
+
+  const index = buildReservationIndex(mergeCompletedHistory(schedule.reservations, schedule.reservationHistory))
+
+  // Both name forms must resolve to exactly the same reservation records.
+  const canonical = index.sectionsForPlayer('Abbey, Stephanie')
+  const display = index.sectionsForPlayer('Stephanie Abbey')
+  assert.deepEqual(display, canonical, 'canonical and First Last lookups agree')
+  assert.ok(canonical.past.length > 0, "Abbey's past reservations are found again")
+  for (const entry of canonical.past) assert.equal(entry.player, 'Abbey, Stephanie', 'canonical Sheet value is preserved')
+
+  // Chen shares Abbey's past Peninsula session and is found by either form.
+  const chen = index.sectionsForPlayer('Alice Chen')
+  assert.deepEqual(chen, index.sectionsForPlayer('Chen, Alice'))
+  assert.ok(chen.past.length > 0, "Chen's shared past session is found")
+
+  // Non-Barnes consecutive slots group into one 60-minute session; Barnes stays 30.
+  const peninsula = canonical.past.find((e) => e.location === 'Peninsula Tennis Club')
+  assert.equal(peninsula.minutes, 60, 'two consecutive non-Barnes slots are ONE session')
+  const barnes = canonical.past.filter((e) => e.location === 'Barnes Tennis Center')
+  assert.ok(barnes.length >= 2, 'Barnes slots stay separate')
+  assert.ok(barnes.every((e) => e.minutes === 30))
+
+  // Hidden match-play locations remain searchable.
+  const usd = index.sectionsForPlayer('Kelly Shi').upcoming.find((e) => e.location === 'USD')
+  assert.ok(usd, 'a USD (hidden) reservation is still found')
+  assert.equal(usd.viewOnly, true)
+
+  // Every past entry is correctly marked ended and view-only.
+  for (const entry of canonical.past) {
+    assert.equal(entry.status, 'Ended')
+    assert.equal(entry.viewOnly, true)
+  }
+})

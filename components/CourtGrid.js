@@ -1,6 +1,6 @@
 import React, { useMemo } from 'react'
 import PlayerChip from './PlayerChip'
-import { courtSessionBlocks } from '../lib/schedule-display'
+import { EMPTY_RESERVATION_INDEX } from '../lib/reservation-index'
 
 function CourtGraphic({ highlight, gradientId }) {
   return (
@@ -56,18 +56,20 @@ function SessionPreview({ blocks, completedSlots }) {
   )
 }
 
-export default function CourtGrid({ courts, reservations, onSelect, selectedCourt, completedSlots = null }) {
+// The shared reservation index is built once per schedule refresh in
+// pages/index.js, so no court card ever re-scans the whole reservations object.
+export default function CourtGrid({ courts, reservationIndex = EMPTY_RESERVATION_INDEX, onSelect, selectedCourt, completedSlots = null }) {
   const blocksByCourt = useMemo(() => {
     const grouped = new Map()
     courts.forEach((court) => {
-      grouped.set(String(court.id), courtSessionBlocks(reservations, {
+      grouped.set(String(court.id), reservationIndex.blocksForCourt({
         dateKey: court.date,
         location: court.location,
         court: court.id,
       }))
     })
     return grouped
-  }, [courts, reservations])
+  }, [courts, reservationIndex])
 
   const rows = []
   for (let i = 0; i < courts.length; i += 3) rows.push(courts.slice(i, i + 3))

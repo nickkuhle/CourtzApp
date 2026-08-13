@@ -1,5 +1,5 @@
 import React, { useEffect, useId, useMemo, useRef, useState } from 'react'
-import { formatPlayerName } from '../lib/schedule-display'
+import { formatPlayerName, matchRosterQuery, normalizeNameKey } from '../lib/player-names'
 
 const APPEARANCE = {
   navbar: {
@@ -19,13 +19,10 @@ const APPEARANCE = {
   },
 }
 
-function searchableName(name) {
-  return `${name} ${formatPlayerName(name)}`.toLowerCase()
-}
-
 // Shared identity picker used wherever the desk changes the player for whom it
-// is acting. The selected value passed to onSelect is always the untouched,
-// canonical roster name; only the text shown to people is reformatted.
+// is acting: the navbar, Find a Court, the court schedule and the reservation
+// search. The value passed to onSelect is always the untouched, canonical
+// roster name; only the text shown to people is reformatted.
 export default function PlayerSwitcher({
   currentPlayer,
   roster = [],
@@ -49,20 +46,32 @@ export default function PlayerSwitcher({
   useEffect(() => () => clearTimeout(blurTimer.current), [])
 
   const filtered = useMemo(() => {
-    const q = query.trim().toLowerCase()
-    return roster.filter((name) => !q || searchableName(name).includes(q)).slice(0, 30)
+    const q = normalizeNameKey(query)
+    if (!q) return roster
+    return matchRosterQuery(roster, query)
   }, [query, roster])
 
-  const totalMatches = useMemo(() => {
-    const q = query.trim().toLowerCase()
-    return roster.filter((name) => !q || searchableName(name).includes(q)).length
-  }, [query, roster])
+  const visible = useMemo(() => filtered.slice(0, 30), [filtered])
 
   function choose(name) {
     if (!name) return
+    clearTimeout(blurTimer.current)
+    // Always hand back the canonical Sheet value, never the typed text.
     onSelect?.(name)
     setQuery(formatPlayerName(name))
     setOpen(false)
+  }
+
+  // Typed text is only ever committed through a roster entry, so the selected
+  // player always resolves back to a real canonical Sheet value.
+  function commitQuery() {
+    if (filtered.length) {
+      choose(filtered[0])
+      return true
+    }
+    setQuery(formatPlayerName(currentPlayer))
+    setOpen(false)
+    return false
   }
 
   function openAndSelect(event) {
@@ -91,17 +100,24 @@ export default function PlayerSwitcher({
           onFocus={openAndSelect}
           onClick={(event) => event.currentTarget.select()}
           onBlur={() => {
-            blurTimer.current = setTimeout(() => setOpen(false), 150)
+            // Leaving the field without picking anything reverts to the current
+            // player rather than leaving an uncommitted name behind.
+            blurTimer.current = setTimeout(() => {
+              setOpen(false)
+              setQuery(formatPlayerName(currentPlayer))
+            }, 150)
           }}
           onKeyDown={(event) => {
-            if (event.key === 'Enter' && filtered.length) {
+            if (event.key === 'Enter') {
               event.preventDefault()
-              choose(filtered[0])
+              commitQuery()
             }
             if (event.key === 'Escape') {
+              // Escape closes only the dropdown — never the surrounding modal.
               event.preventDefault()
               event.stopPropagation()
               setOpen(false)
+              setQuery(formatPlayerName(currentPlayer))
             }
           }}
           placeholder="Search player…"
@@ -114,28 +130,31 @@ export default function PlayerSwitcher({
             className={`absolute top-full z-[80] mt-2 w-64 max-w-[calc(100vw-2rem)] overflow-hidden rounded-xl border border-slate-200 bg-white text-left shadow-2xl ${dropdownAlign === 'left' ? 'left-0' : 'right-0'}`}
           >
             <div className="max-h-64 overflow-auto py-1">
-              {filtered.map((name) => (
+              {visible.map((name) => (
                 <button
                   key={name}
                   type="button"
                   role="option"
                   aria-selected={name === currentPlayer}
-                  onMouseDown={(event) => {
+                  // onMouseDown fires before the input's blur on desktop and
+                  // onPointerDown covers touch, so a tap always registers.
+                  onPointerDown={(event) => {
                     event.preventDefault()
                     choose(name)
                   }}
+                  onMouseDown={(event) => event.preventDefault()}
                   onClick={() => choose(name)}
                   className={`w-full px-3 py-2 text-left text-sm transition hover:bg-emerald-50 ${name === currentPlayer ? 'bg-emerald-100 font-semibold text-emerald-800' : 'text-slate-700'}`}
                 >
                   {formatPlayerName(name)}
                 </button>
               ))}
-              {filtered.length === 0 && (
+              {visible.length === 0 && (
                 <div className="px-4 py-3 text-sm text-slate-400">No players found</div>
               )}
             </div>
             <div className="border-t border-slate-100 px-3 py-1.5 text-xs text-slate-400">
-              {totalMatches} of {roster.length} players
+              {filtered.length} of {roster.length} players
             </div>
           </div>
         )}

@@ -15,6 +15,8 @@ import {
   MAX_SESSIONS_PER_DAY,
 } from '../lib/booking-rules'
 import { DEFAULT_PRACTICE_LOCATIONS, MATCH_PLAY_LOCATIONS, isBarnesLocation } from '../lib/locations'
+import { buildReservationIndex, mergeCompletedHistory } from '../lib/reservation-index'
+import { normalizeNameKey } from '../lib/player-names'
 
 const LOGO_URL = '/logo.svg'
 
@@ -105,6 +107,22 @@ function formatTimeLabel(totalMinutes) {
   return `${displayHours}:${displayMinutes} ${suffix}`
 }
 
+// The last-refreshed clock is always shown in tournament time (San Diego), no
+// matter which timezone the desk's laptop is set to.
+function formatRefreshedAt(timestamp) {
+  if (!timestamp) return ''
+  try {
+    return `${new Date(timestamp).toLocaleTimeString('en-US', {
+      timeZone: 'America/Los_Angeles',
+      hour: 'numeric',
+      minute: '2-digit',
+      second: '2-digit',
+    })} PT`
+  } catch {
+    return `${new Date(timestamp).toLocaleTimeString()} PT`
+  }
+}
+
 const THIRTY_MIN_SLOTS = (() => {
   const labels = []
   for (let t = 8 * 60; t <= 18 * 60; t += 30) {
@@ -154,6 +172,10 @@ function pickDefaultDay(days) {
 // parts): courts that are completely open for every part, plus courts already
 // booked by that player (so they can cancel from the same list).
 function findCourtsForBooking(courtsList, reservations, location, dateKey, slots, name) {
+  // Ownership is compared on the normalised key so switching players in the
+  // navbar / Find a Court header immediately re-detects "Booked by you", even
+  // when the Sheet cell carries stray whitespace or different capitalisation.
+  const nameKey = normalizeNameKey(name)
   return (courtsList || [])
     .map((courtId) => {
       const parts = slots.map((slot) => {
@@ -161,7 +183,7 @@ function findCourtsForBooking(courtsList, reservations, location, dateKey, slots
         return Array.isArray(players) ? players : []
       })
       const anyTaken = parts.some((p) => p.length > 0)
-      const mine = parts.some((p) => p.includes(name))
+      const mine = parts.some((p) => p.some((n) => normalizeNameKey(n) === nameKey))
       const open = !anyTaken
       return open || mine ? { location, courtId, mine } : null
     })
@@ -198,6 +220,10 @@ export default function Home() {
   const [showAddLocation, setShowAddLocation] = useState(false)
 
   const [reservations, setReservations] = useState({})
+  // Ended slots, which the v2.1 Apps Script strips from the bookable schedule.
+  // Kept apart from `reservations` so it can never be booked/cancelled against
+  // or be affected by an optimistic update; it is merged for display only.
+  const [reservationHistory, setReservationHistory] = useState({})
   const [roster, setRoster] = useState(FALLBACK_ROSTER)
   const [rosterLoaded, setRosterLoaded] = useState(false)
   const [pendingReservations, setPendingReservations] = useState({})
@@ -209,7 +235,13 @@ export default function Home() {
   const [findNotice, setFindNotice] = useState(null)
   const [bookingModal, setBookingModal] = useState(null) // {mode, courtId, slots, players, title, subtitle}
   const [sheetsConnected, setSheetsConnected] = useState(null) // null = still loading/unknown
+  const [lastRefreshedAt, setLastRefreshedAt] = useState(null) // only set after a SUCCESSFUL read
+  const [isRefreshing, setIsRefreshing] = useState(false)
   const lastScheduleSync = useRef(0)
+  // Guards against overlapping schedule reads and against a background refresh
+  // stomping on an in-flight optimistic booking/cancellation.
+  const scheduleRequestInFlight = useRef(false)
+  const pendingWriteCount = useRef(0)
 
   useEffect(() => {
     setMounted(true)
@@ -233,13 +265,25 @@ export default function Home() {
   // response also reports whether the server is actually wired to Google
   // Sheets; when it is not, a warning banner is shown instead of silently
   // presenting empty data.
-  const refreshSchedule = useCallback(async (force = false) => {
+  const refreshSchedule = useCallback(async (force = false, { background = false } = {}) => {
+    // Never run two schedule reads at once, and never let a background refresh
+    // overwrite an optimistic booking/cancellation that has not settled yet.
+    if (scheduleRequestInFlight.current) return false
+    if (background && pendingWriteCount.current > 0) return false
+    scheduleRequestInFlight.current = true
+    setIsRefreshing(true)
     try {
       const response = await fetch(force ? '/api/schedule?refresh=1' : '/api/schedule')
       if (!response.ok) throw new Error('Failed to load schedule')
       const result = await response.json()
       lastScheduleSync.current = Date.now()
+      // A write that started while this read was in flight owns the truth for
+      // the affected slots, so its optimistic state is left alone.
+      if (background && pendingWriteCount.current > 0) return false
       setReservations(result.reservations || {})
+      setReservationHistory(result.reservationHistory || {})
+      // Only a successful response moves the timestamp forward.
+      setLastRefreshedAt(Date.now())
       if (Array.isArray(result.roster) && result.roster.length > 0) setRoster(result.roster)
       if (Array.isArray(result.locations) && result.locations.length > 0) setLocations(result.locations)
       if (result.courtsByDate && typeof result.courtsByDate === 'object') setCourtsByDate(result.courtsByDate)
@@ -254,10 +298,14 @@ export default function Home() {
       setSheetsConnected(result.connected === true)
       return true
     } catch (e) {
+      // A failed refresh keeps the last successfully loaded schedule AND the
+      // previous timestamp; only the connection warning changes.
       console.warn('Unable to load schedule from the server', e)
       setSheetsConnected(false)
       return false
     } finally {
+      scheduleRequestInFlight.current = false
+      setIsRefreshing(false)
       setRosterLoaded(true)
     }
   }, [])
@@ -270,10 +318,33 @@ export default function Home() {
   // tab is revisited, without hammering the Sheets backend.
   useEffect(() => {
     function handleWindowFocus() {
-      if (Date.now() - lastScheduleSync.current > 30_000) refreshSchedule()
+      if (Date.now() - lastScheduleSync.current > 30_000) refreshSchedule(false, { background: true })
     }
     window.addEventListener('focus', handleWindowFocus)
     return () => window.removeEventListener('focus', handleWindowFocus)
+  }, [refreshSchedule])
+
+  // Low-frequency automatic refresh (~60s) so the desk sees other people's
+  // bookings without touching anything. It only runs while the tab is visible
+  // and never overlaps another read or a pending write. The server cache is
+  // short-lived, so a normal (non-forced) read is enough here.
+  useEffect(() => {
+    const timer = setInterval(() => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return
+      refreshSchedule(false, { background: true })
+    }, 60_000)
+    return () => clearInterval(timer)
+  }, [refreshSchedule])
+
+  // Refresh as soon as the tab becomes visible again if the data went stale
+  // while it was hidden.
+  useEffect(() => {
+    function handleVisibility() {
+      if (document.visibilityState !== 'visible') return
+      if (Date.now() - lastScheduleSync.current > 60_000) refreshSchedule(false, { background: true })
+    }
+    document.addEventListener('visibilitychange', handleVisibility)
+    return () => document.removeEventListener('visibilitychange', handleVisibility)
   }, [refreshSchedule])
 
   useEffect(() => {
@@ -362,6 +433,17 @@ export default function Home() {
     return ids.map((number) => ({ id: number, number, location: selectedLocation, date: selectedDay }))
   }, [courtsByDate, selectedDay, selectedLocation, reservations])
 
+  // --- One shared, memoized reservation index ------------------------------
+  // Built ONCE per schedule change and handed to the court grid, the court
+  // schedule and the reservation search, so none of them re-scan the whole
+  // reservations object. It is display-only: booking validation below keeps
+  // using the canonical names with the untouched v2.1 rules.
+  const displayReservations = useMemo(
+    () => mergeCompletedHistory(reservations, reservationHistory),
+    [reservations, reservationHistory]
+  )
+  const reservationIndex = useMemo(() => buildReservationIndex(displayReservations), [displayReservations])
+
   // How many practice sessions the signed-in player has on the selected day
   // (across every active practice location). Barnes 30-minute slots count one
   // each; elsewhere two consecutive 30-minute slots count as one session.
@@ -426,6 +508,7 @@ export default function Home() {
       snapshot[slot] = [...((reservations[reservationKey]?.[slot] || []) )]
     })
 
+    pendingWriteCount.current += 1
     setPendingReservations((pending) => ({ ...pending, [requestKey]: true }))
     setReservations((current) => {
       const next = { ...current }
@@ -487,6 +570,7 @@ export default function Home() {
       })
       throw e
     } finally {
+      pendingWriteCount.current = Math.max(0, pendingWriteCount.current - 1)
       setPendingReservations((pending) => {
         const next = { ...pending }
         delete next[requestKey]
@@ -577,7 +661,8 @@ export default function Home() {
   function handleFindCourtPick(courtId) {
     if (viewOnlyDate) return
     const players = findSlots.flatMap((slot) => reservations[`${findLocation}|${selectedDay}|${courtId}`]?.[slot] || [])
-    const mine = players.includes(currentPlayer)
+    const currentKey = normalizeNameKey(currentPlayer)
+    const mine = players.some((n) => normalizeNameKey(n) === currentKey)
     if (mine) {
       const group = [...new Set(players)]
       setBookingModal({
@@ -723,16 +808,75 @@ export default function Home() {
               <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
               {Math.min(mySessionsToday.length, MAX_SESSIONS_PER_DAY)}/{MAX_SESSIONS_PER_DAY} sessions today
             </div>
+            {/* The reservation search lives in the body utility row below —
+                keeping it out of the navbar stops the tournament title from
+                being truncated on laptop widths. */}
             <PlayerSwitcher
               currentPlayer={currentPlayer}
               roster={roster}
               onSelect={setCurrentPlayer}
               appearance="navbar"
             />
+          </div>
+        </nav>
+
+        {/* Body utility row: the Google Sheet connection light, the
+            last-refreshed timestamp, a manual refresh and the reservation
+            search entry point that used to crowd the navbar. */}
+        <div className="mb-6 flex flex-col gap-3 rounded-2xl border border-slate-200 bg-white/80 px-4 py-3 shadow-sm backdrop-blur-sm sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1">
+            {sheetsConnected === true && (
+              <span className="flex items-center gap-2 text-sm font-medium text-emerald-800" role="status">
+                <span className="h-2.5 w-2.5 shrink-0 rounded-full bg-emerald-500 shadow-[0_0_0_4px_rgba(16,185,129,0.12)]" />
+                Google Sheet connected
+              </span>
+            )}
+            {sheetsConnected === null && (
+              <span className="flex items-center gap-2 text-sm font-medium text-slate-500" role="status">
+                <span className="h-2.5 w-2.5 shrink-0 animate-pulse rounded-full bg-slate-400" />
+                Connecting to the Google Sheet…
+              </span>
+            )}
+            {sheetsConnected === false && (
+              <span className="flex items-center gap-2 text-sm font-medium text-amber-800" role="status">
+                <span className="h-2.5 w-2.5 shrink-0 rounded-full bg-amber-500" />
+                Google Sheet not connected
+              </span>
+            )}
+            <span className="text-slate-300" aria-hidden="true">·</span>
+            <span className="text-xs text-slate-500">
+              {lastRefreshedAt
+                ? <>Last refreshed <span className="font-semibold text-slate-700">{formatRefreshedAt(lastRefreshedAt)}</span></>
+                : 'Not refreshed yet'}
+            </span>
+            {isRefreshing && (
+              <span className="inline-flex items-center gap-1 text-xs font-medium text-slate-400" role="status">
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" className="animate-spin">
+                  <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83" />
+                </svg>
+                Refreshing…
+              </span>
+            )}
+          </div>
+          <div className="flex shrink-0 flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={() => refreshSchedule(true)}
+              disabled={isRefreshing}
+              className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-600 transition hover:border-slate-300 hover:bg-slate-50 disabled:cursor-wait disabled:opacity-60"
+              title="Reload the schedule from the Google Sheet now"
+            >
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" className={isRefreshing ? 'animate-spin' : ''}>
+                <polyline points="23 4 23 10 17 10" />
+                <polyline points="1 20 1 14 7 14" />
+                <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
+              </svg>
+              Refresh
+            </button>
             <button
               type="button"
               onClick={() => setShowPlayerReservations(true)}
-              className="inline-flex items-center gap-1.5 rounded-full border border-white/20 bg-white/15 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-white/25"
+              className="inline-flex items-center gap-1.5 rounded-xl border border-[#1f5f99]/25 bg-[#1f5f99] px-3.5 py-1.5 text-xs font-semibold text-white shadow-sm transition hover:bg-[#164a7a]"
               title="Search past, current and upcoming player reservations"
             >
               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -744,16 +888,7 @@ export default function Home() {
               Player&apos;s reservations
             </button>
           </div>
-        </nav>
-
-        {/* A plain-language connection light lets the desk know whether it is
-            safe to make bookings. Never hide a failed Sheets connection. */}
-        {sheetsConnected === true && (
-          <div className="mb-6 flex items-center justify-center gap-2 text-sm font-medium text-emerald-800" role="status">
-            <span className="h-2.5 w-2.5 rounded-full bg-emerald-500 shadow-[0_0_0_4px_rgba(16,185,129,0.12)]" />
-            Google Sheet connected — reservations are up to date
-          </div>
-        )}
+        </div>
         {sheetsConnected === false && (
           <div className="mb-6 flex flex-wrap items-center gap-3 rounded-2xl border border-amber-300 bg-amber-50 px-4 py-3 text-amber-900 shadow-sm" role="alert">
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="shrink-0 text-amber-500">
@@ -913,7 +1048,7 @@ export default function Home() {
             </div>
           ) : (
             <div className="flex justify-center">
-              <CourtGrid courts={courts} reservations={reservations} onSelect={handleSelectCourt} selectedCourt={selectedCourt} completedSlots={completedSlots} />
+              <CourtGrid courts={courts} reservationIndex={reservationIndex} onSelect={handleSelectCourt} selectedCourt={selectedCourt} completedSlots={completedSlots} />
             </div>
           )}
         </section>
@@ -1195,7 +1330,7 @@ export default function Home() {
 
       {showPlayerReservations && (
         <PlayerReservationsModal
-          reservations={reservations}
+          reservationIndex={reservationIndex}
           roster={roster}
           initialPlayer={currentPlayer}
           onClose={() => setShowPlayerReservations(false)}
@@ -1207,9 +1342,11 @@ export default function Home() {
           court={selectedCourt}
           date={selectedDay}
           location={selectedLocation}
-          reservations={reservations}
+          reservations={displayReservations}
+          reservationIndex={reservationIndex}
           roster={roster}
           currentPlayer={currentPlayer}
+          onSelectPlayer={setCurrentPlayer}
           pendingReservations={pendingReservations}
           practiceLocations={activeLocations}
           viewOnly={viewOnlyDate}

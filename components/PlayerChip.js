@@ -1,5 +1,5 @@
 import React from 'react'
-import { formatPlayerName, playerInitials, playerStyle } from '../lib/schedule-display'
+import { formatPlayerName, playerInitials, playerStyle } from '../lib/player-names'
 
 export default function PlayerChip({ name, compact = false, highlight = false, className = '' }) {
   const style = playerStyle(name)

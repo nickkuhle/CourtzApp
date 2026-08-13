@@ -1,3 +1,8 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Loaded after Tailwind's preflight so the original typography still wins. */
 body {
   font-family: 'SF Pro Text', 'SF Pro Icons', 'Helvetica Neue', 'Helvetica',
     'Arial', sans-serif;
@@ -11,4 +16,27 @@ body {
   -moz-osx-font-smoothing: grayscale;
   text-rendering: optimizeLegibility;
   hyphens: auto;
+}
+.main {
+  padding: 20px 20px 60px;
+  max-width: 680px;
+  margin: 0 auto;
+}
+
+.hr {
+  border: none;
+  border-bottom: 1px solid #efefef;
+  margin: 3em auto;
+}
+
+/* Slim horizontal scrollbar for the day-selector strip. */
+.scrollbar-thin {
+  scrollbar-width: thin;
+}
+.scrollbar-thin::-webkit-scrollbar {
+  height: 6px;
+}
+.scrollbar-thin::-webkit-scrollbar-thumb {
+  background-color: rgb(203 213 225);
+  border-radius: 9999px;
 }

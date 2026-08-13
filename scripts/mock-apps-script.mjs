@@ -80,6 +80,8 @@ function emptyGrid(ncourts, baseCourt = 1) {
 
 // Seed reservations on the view-only day (like the real sheet's Wednesday
 // reservations that the old parser used to drop).
+const ROSTER = ['Abbey, Stephanie', 'Chen, Alice', 'Waters, Eadan', 'Reeves, Sam', 'Zhou, Zhongyi', 'Andreoli, Mia', 'Shi, Kelly']
+
 const seedNames = {
   'Pacific Beach Tennis Club': { court: 1, names: ['Waters, Eadan', 'Chen, Alice'] },
   'Balboa Tennis Center': { court: 3, names: ['Reeves, Sam', 'Zhou, Zhongyi'] },
@@ -109,6 +111,34 @@ for (const tab of tabs) {
   }
   grids[tab] = grid
 }
+
+// Past reservations, so the reservation search has real history to find.
+// Peninsula gets a consecutive pair (one 60-minute session) and Barnes two
+// separate 30-minute sessions on the day before yesterday.
+function seedAt(tab, dateKey, court, startLabel, name, secondRow = false) {
+  const grid = grids[tab]
+  const label = dateLabel(dateKey)
+  const dateRow = grid.findIndex((row) => String(row[0]) === label)
+  if (dateRow === -1) return
+  // The court header sits directly under the date row; find the court's column.
+  const header = grid[dateRow + 1]
+  const col = header.findIndex((cell, i) => i > 0 && String(cell) === String(court))
+  if (col === -1) return
+  for (let r = dateRow + 2; r < grid.length; r++) {
+    if (/^(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s/.test(String(grid[r][0]))) return
+    if (String(grid[r][0]).startsWith(startLabel)) {
+      grid[r + (secondRow ? 1 : 0)][col] = name
+      return
+    }
+  }
+}
+
+seedAt('Peninsula Tennis Club', DAY_KEYS[0], 2, '8:00 AM', 'Abbey, Stephanie')
+seedAt('Peninsula Tennis Club', DAY_KEYS[0], 2, '8:30 AM', 'Abbey, Stephanie')
+seedAt('Peninsula Tennis Club', DAY_KEYS[0], 2, '8:00 AM', 'Chen, Alice', true)
+seedAt('Peninsula Tennis Club', DAY_KEYS[0], 2, '8:30 AM', 'Chen, Alice', true)
+seedAt('Barnes TC', DAY_KEYS[1], 4, '9:00 AM', 'Abbey, Stephanie')
+seedAt('Barnes TC', DAY_KEYS[1], 4, '10:00 AM', 'Abbey, Stephanie')
 
 // Very small span-aware parser mirroring the Apps Script behaviour
 function parseGrid(values, tab) {
@@ -302,7 +332,7 @@ const server = http.createServer((req, res) => {
       if (!Object.keys(slots).length) delete all[key]
     }
     return send({ success: true, version: SCRIPT_VERSION, data: {
-      roster: ['Abbey, Stephanie', 'Chen, Alice', 'Waters, Eadan', 'Reeves, Sam', 'Zhou, Zhongyi', 'Andreoli, Mia', 'Shi, Kelly'],
+      roster: ROSTER,
       reservations: all,
       days: [...new Set(days)].sort(),
       courtsByDate,
@@ -310,6 +340,18 @@ const server = http.createServer((req, res) => {
       practiceSessions,
       defaultPracticeLocations: DEFAULT_PRACTICE_LOCATIONS,
     } })
+  }
+  // Backwards-compatible, read-only reservations dump (exactly what the
+  // deployed v2.1 Apps Script's `getAll` action returns). Unlike getSchedule it
+  // does NOT prune 30-minute slots that have already ended, so the reservation
+  // search can show a player's past sessions.
+  if (req.method === 'GET' && ['getAll', 'getReservations'].includes(url.searchParams.get('action'))) {
+    return send({
+      success: true,
+      version: SCRIPT_VERSION,
+      roster: ROSTER,
+      reservations: currentReservations(),
+    })
   }
   if (req.method === 'GET' && url.searchParams.get('action') === 'ping') {
     return send({ success: true, version: SCRIPT_VERSION, tabs })

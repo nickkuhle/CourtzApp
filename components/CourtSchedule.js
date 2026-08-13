@@ -1,7 +1,9 @@
-import React, { useEffect } from 'react'
+import React, { useEffect, useMemo } from 'react'
 import { existingPlayerSessions, MAX_SESSIONS_PER_DAY } from '../lib/booking-rules'
 import PlayerChip from './PlayerChip'
-import { courtSessionBlocks, formatPlayerName } from '../lib/schedule-display'
+import PlayerSwitcher from './PlayerSwitcher'
+import { EMPTY_RESERVATION_INDEX } from '../lib/reservation-index'
+import { formatPlayerName, normalizeNameKey } from '../lib/player-names'
 
 function formatTimeLabel(totalMinutes) {
   const hours = Math.floor(totalMinutes / 60)
@@ -46,7 +48,7 @@ function SpinnerIcon() {
   )
 }
 
-function Slot({ time, reservedBy = [], currentPlayer, onClick, disabled, ended, isOwnedByCurrentPlayer, isSaving }) {
+function Slot({ time, reservedBy = [], isCurrentPlayer, onClick, disabled, ended, isOwnedByCurrentPlayer, isSaving }) {
   const count = Array.isArray(reservedBy) ? reservedBy.length : 0
   const busy = count > 0
 
@@ -93,7 +95,7 @@ function Slot({ time, reservedBy = [], currentPlayer, onClick, disabled, ended, 
           {busy && reservedBy.length > 0 && (
             <div className="mt-2 flex flex-wrap gap-1.5">
               {reservedBy.map((name) => (
-                <PlayerChip key={name} name={name} compact highlight={name === currentPlayer} />
+                <PlayerChip key={name} name={name} compact highlight={isCurrentPlayer?.(name)} />
               ))}
             </div>
           )}
@@ -113,13 +115,19 @@ function Slot({ time, reservedBy = [], currentPlayer, onClick, disabled, ended, 
 // group booked in that slot. Days outside today/tomorrow and 30-minute slots
 // that have already ended are view-only: they can be inspected but never
 // booked or canceled.
-export default function CourtSchedule({ court, date, location, reservations, currentPlayer = 'Alice Johnson', pendingReservations = {}, practiceLocations = null, viewOnly = false, completedSlots = null, barnesOnly30 = false, onOpenBooking, onPreviousCourt, onNextCourt, canGoPrevious = false, canGoNext = false, onClose }) {
+export default function CourtSchedule({ court, date, location, reservations, reservationIndex = EMPTY_RESERVATION_INDEX, roster = [], onSelectPlayer, currentPlayer = 'Alice Johnson', pendingReservations = {}, practiceLocations = null, viewOnly = false, completedSlots = null, barnesOnly30 = false, onOpenBooking, onPreviousCourt, onNextCourt, canGoPrevious = false, canGoNext = false, onClose }) {
   if (!court) return null
 
   useEffect(() => {
     function handleKeyDown(event) {
-      if (event.key === 'ArrowLeft' && canGoPrevious) onPreviousCourt?.()
-      if (event.key === 'ArrowRight' && canGoNext) onNextCourt?.()
+      // Arrow keys must not steal focus from the player search box, and Escape
+      // inside the switcher only closes its dropdown (it calls
+      // stopPropagation/preventDefault, so it never reaches this listener).
+      const tag = event.target?.tagName
+      const typing = tag === 'INPUT' || tag === 'TEXTAREA' || event.target?.isContentEditable
+      if (event.defaultPrevented) return
+      if (!typing && event.key === 'ArrowLeft' && canGoPrevious) onPreviousCourt?.()
+      if (!typing && event.key === 'ArrowRight' && canGoNext) onNextCourt?.()
       if (event.key === 'Escape') onClose?.()
     }
     window.addEventListener('keydown', handleKeyDown)
@@ -130,14 +138,22 @@ export default function CourtSchedule({ court, date, location, reservations, cur
   const key = `${location}|${date}|${court}`
   const reserved = reservations[key] || {}
 
+  // Ownership is matched on the normalised name key so a stray space or a
+  // different capitalisation in the Sheet never hides "Your booking".
+  const currentPlayerKey = normalizeNameKey(currentPlayer)
+  const isCurrentPlayer = (name) => normalizeNameKey(name) === currentPlayerKey
+  const ownsSlot = (names) => (Array.isArray(names) ? names : []).some(isCurrentPlayer)
+
   // Practice sessions already used by this player today (max 2). Barnes
   // 30-minute slots count one each; elsewhere two consecutive 30-minute slots
-  // on the same court count as a single session.
-  const sessionsUsed = existingPlayerSessions(reservations, {
+  // on the same court count as a single session. Recomputed whenever the
+  // selected player changes, so switching players inside this modal updates
+  // the counter immediately.
+  const sessionsUsed = useMemo(() => existingPlayerSessions(reservations, {
     dateKey: date,
     name: currentPlayer,
     practiceLocations,
-  }).length
+  }).length, [reservations, date, currentPlayer, practiceLocations])
 
   const totalSlots = (() => {
     const start = 8 * 60
@@ -147,8 +163,8 @@ export default function CourtSchedule({ court, date, location, reservations, cur
     return count
   })()
   const bookedCount = Object.values(reserved).filter((v) => Array.isArray(v) && v.length > 0).length
-  const myCount = Object.values(reserved).reduce((acc, v) => acc + (Array.isArray(v) && v.includes(currentPlayer) ? 1 : 0), 0)
-  const sessionBlocks = courtSessionBlocks(reservations, { dateKey: date, location, court })
+  const myCount = Object.values(reserved).reduce((acc, v) => acc + (ownsSlot(v) ? 1 : 0), 0)
+  const sessionBlocks = reservationIndex.blocksForCourt({ dateKey: date, location, court })
 
   const slots = []
   const start = 8 * 60 // 8:00
@@ -230,13 +246,20 @@ export default function CourtSchedule({ court, date, location, reservations, cur
           </div>
         </div>
 
-        {/* Controls */}
+        {/* Controls — the identity picker is the exact same shared component
+            used by the navbar and Find a Court, so switching a player here
+            instantly re-evaluates slot ownership, the session counter and the
+            cancellation eligibility below. */}
         <div className="px-6 py-4 border-b border-slate-100 shrink-0">
           <div className="flex flex-wrap items-center gap-3">
-            <div className="flex items-center gap-2">
-              <span className="text-sm font-medium text-slate-600">Booking Courts As</span>
-              <span className="rounded-full bg-[#1f5f99]/10 px-3 py-1 text-sm font-semibold text-[#1f5f99]">{formatPlayerName(currentPlayer)}</span>
-            </div>
+            <PlayerSwitcher
+              currentPlayer={currentPlayer}
+              roster={roster}
+              onSelect={onSelectPlayer}
+              label="Booking Courts As"
+              appearance="light"
+              dropdownAlign="left"
+            />
             <span className="ml-auto rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-500">
               {barnesOnly30 ? '30-minute times — Barnes allows one 30-minute session per reservation' : '30-minute times'}
             </span>
@@ -258,7 +281,7 @@ export default function CourtSchedule({ court, date, location, reservations, cur
             </div>
             <div className="grid max-h-40 gap-2 overflow-auto sm:grid-cols-2">
               {sessionBlocks.map((block) => {
-                const mine = block.players.includes(currentPlayer)
+                const mine = block.players.some(isCurrentPlayer)
                 return (
                   <div
                     key={`${block.start}|${block.slots.join(',')}`}
@@ -269,7 +292,7 @@ export default function CourtSchedule({ court, date, location, reservations, cur
                       <span className="text-[10px] font-bold uppercase tracking-wide text-slate-400">{block.slots.length === 2 ? '60 min' : '30 min'}</span>
                     </div>
                     <div className="mt-2 flex flex-wrap gap-1.5">
-                      {block.players.map((name) => <PlayerChip key={name} name={name} compact highlight={name === currentPlayer} />)}
+                      {block.players.map((name) => <PlayerChip key={name} name={name} compact highlight={isCurrentPlayer(name)} />)}
                     </div>
                   </div>
                 )
@@ -284,7 +307,7 @@ export default function CourtSchedule({ court, date, location, reservations, cur
             {slots.map((slot) => {
               const players = reserved[slot.label] || []
               const ended = completedSlots ? completedSlots.has(slot.label) : false
-              const isOwnedByCurrentPlayer = players.includes(currentPlayer)
+              const isOwnedByCurrentPlayer = ownsSlot(players)
               const isReservedBySomeoneElse = players.length > 0 && !isOwnedByCurrentPlayer
               const requestKey = `${key}|${slot.label}|${currentPlayer}`
               const isSaving = Boolean(pendingReservations[requestKey])
@@ -293,7 +316,7 @@ export default function CourtSchedule({ court, date, location, reservations, cur
                   key={slot.label}
                   time={slot.label}
                   reservedBy={players}
-                  currentPlayer={currentPlayer}
+                  isCurrentPlayer={isCurrentPlayer}
                   disabled={isReservedBySomeoneElse || isSaving}
                   ended={ended}
                   isOwnedByCurrentPlayer={isOwnedByCurrentPlayer}
