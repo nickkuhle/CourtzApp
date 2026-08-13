@@ -1,6 +1,7 @@
 import React, { useEffect } from 'react'
 import { existingPlayerSessions, MAX_SESSIONS_PER_DAY } from '../lib/booking-rules'
 import PlayerChip from './PlayerChip'
+import PlayerSwitcher from './PlayerSwitcher'
 import { courtSessionBlocks, formatPlayerName } from '../lib/schedule-display'
 
 function formatTimeLabel(totalMinutes) {
@@ -236,10 +237,13 @@ export default function CourtSchedule({ court, date, location, reservations, cur
         {/* Controls */}
         <div className="px-6 py-4 border-b border-slate-100 shrink-0">
           <div className="flex flex-wrap items-center gap-3">
-            <div className="flex items-center gap-2">
-              <span className="text-sm font-medium text-slate-600">Booking Courts As</span>
-              <span className="rounded-full bg-[#1f5f99]/10 px-3 py-1 text-sm font-semibold text-[#1f5f99]">{formatPlayerName(currentPlayer)}</span>
-            </div>
+            <PlayerSwitcher
+              currentPlayer={currentPlayer}
+              roster={roster}
+              onSelect={onSelectPlayer}
+              appearance="light"
+              sessionsLabel={`${Math.min(sessionsUsed, MAX_SESSIONS_PER_DAY)}/${MAX_SESSIONS_PER_DAY} sessions`}
+            />
             <span className="ml-auto rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-500">
               {barnesOnly30 ? '30-minute times — Barnes allows one 30-minute session per reservation' : '30-minute times'}
             </span>
