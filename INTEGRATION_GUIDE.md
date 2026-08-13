@@ -33,7 +33,7 @@ the write either fully succeeds or fully fails (half of a group is never saved).
 - **Dates come from the Sheet.** No hardcoded tournament dates. The app shows every date the Sheet defines, sorted, with today selected by default when the Sheet has it. Past dates stay clickable so old reservations can be reviewed.
 - **Courts come from the Sheet.** Each date's court-header row defines the courts; empty courts still appear. Barnes Court 6 shows up automatically.
 - **Multi-column courts are read and written correctly.** Each court may span several spreadsheet columns (for example Barnes courts occupy two columns each). Every player-name cell belonging to the court is read, and bookings/cancellations write to all of that court's cells. This is what makes the existing Wednesday reservations appear.
-- **Find a Court** uses the day selected on the main page, and asks for location, start time and length instead of a fixed time list. Barnes allows 30-minute bookings only; the other locations allow 30 minutes or 1 hour. A 1-hour court is offered only when both of its 30-minute parts are open.
+- **Find a Court** lets you tap the day (header chip or step 1) to change it, then pick a location, start time and length. Barnes allows 30-minute bookings only; the other locations allow 30 minutes or 1 hour. A 1-hour court is offered only when both of its 30-minute parts are open.
 - **Group bookings.** Booking starts with the signed-in player, more players can be searched from the roster and added, and every selected player is shown before confirming. Canceling a slot removes the whole group that was booked there.
 
 ## How to test it
