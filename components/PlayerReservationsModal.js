@@ -1,11 +1,12 @@
 import React, { useEffect, useMemo, useState } from 'react'
 import PlayerChip from './PlayerChip'
 import PlayerSwitcher from './PlayerSwitcher'
-import { formatPlayerName, playerReservationSections } from '../lib/schedule-display'
+import { EMPTY_RESERVATION_INDEX } from '../lib/reservation-index'
+import { formatPlayerName, playerStyle, resolveCanonicalName } from '../lib/schedule-display'
 
 const SECTION_META = [
-  { key: 'past', title: 'Past', description: 'Previous tournament days' },
-  { key: 'current', title: 'Current', description: 'Today in San Diego' },
+  { key: 'past', title: 'Past', description: 'Earlier tournament days' },
+  { key: 'current', title: 'Current / today', description: 'Today in San Diego' },
   { key: 'upcoming', title: 'Upcoming', description: 'Tomorrow and later dates' },
 ]
 
@@ -45,7 +46,7 @@ function ReservationEntry({ entry }) {
         <div className="text-right">
           <div className="text-base font-bold text-[#1f5f99]">{entry.timeRange}</div>
           <div className="mt-1 text-[11px] text-slate-400">
-            {entry.slots.length === 2 ? '60-minute session' : '30-minute session'}
+            {entry.durationMinutes === 60 ? '60-minute session' : '30-minute session'}
           </div>
         </div>
       </div>
@@ -67,13 +68,22 @@ function ReservationEntry({ entry }) {
   )
 }
 
-export default function PlayerReservationsModal({ reservations, roster, initialPlayer, onClose }) {
-  const [selectedPlayer, setSelectedPlayer] = useState(initialPlayer)
-  const sections = useMemo(
-    () => playerReservationSections(reservations, selectedPlayer),
-    [reservations, selectedPlayer]
+// Reads exclusively from the shared reservation index built once in
+// pages/index.js. The index already covers EVERY loaded date and location
+// (including hidden match-play sites), already groups non-Barnes consecutive
+// slots into the same 60-minute sessions the booking rules use, and already
+// answers to both "Last, First" and "First Last" lookups.
+export default function PlayerReservationsModal({ index = EMPTY_RESERVATION_INDEX, roster = [], initialPlayer, onClose }) {
+  // Always hold a CANONICAL roster value in state. The switcher only ever emits
+  // canonical values, and the initial player is resolved through the roster (and
+  // then the index) so a display-form prop still lands on the Sheet's value.
+  const [selectedPlayer, setSelectedPlayer] = useState(
+    () => resolveCanonicalName(initialPlayer, roster) || index.lookup(initialPlayer) || String(initialPlayer || '').trim()
   )
-  const total = sections.past.length + sections.current.length + sections.upcoming.length
+
+  const sections = useMemo(() => index.sections(selectedPlayer), [index, selectedPlayer])
+  const total = sections.total
+  const style = playerStyle(selectedPlayer)
 
   useEffect(() => {
     function handleKeyDown(event) {
@@ -92,7 +102,7 @@ export default function PlayerReservationsModal({ reservations, roster, initialP
             <div>
               <div className="flex items-center gap-2 text-blue-200">
                 <CalendarIcon />
-                <span className="text-xs font-bold uppercase tracking-[0.15em]">Player schedule</span>
+                <span className="text-xs font-semibold uppercase tracking-wider">Full schedule</span>
               </div>
               <h2 className="mt-1 text-2xl font-bold text-white">Player&apos;s reservations</h2>
               <p className="mt-1 text-sm text-blue-200">Past, current and upcoming reservations from the loaded Google Sheet.</p>
@@ -117,6 +127,21 @@ export default function PlayerReservationsModal({ reservations, roster, initialP
             <div className="text-sm text-slate-500">
               <span className="font-bold text-slate-800">{total}</span> reservation session{total === 1 ? '' : 's'}
             </div>
+          </div>
+          {/* Unambiguous "whose reservations are these" state. The canonical
+              Sheet value is shown next to the friendly form so the desk can see
+              exactly which row is being matched. */}
+          <div className="mt-3 flex flex-wrap items-center gap-2 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2">
+            <span className={`inline-flex h-7 w-7 items-center justify-center rounded-full text-[10px] font-bold ${style.avatar}`}>
+              {formatPlayerName(selectedPlayer).split(/\s+/).filter(Boolean).map((w) => w[0]).slice(0, 2).join('').toUpperCase() || '?'}
+            </span>
+            <div className="min-w-0">
+              <div className="text-sm font-bold text-slate-800">Showing reservations for {formatPlayerName(selectedPlayer) || '—'}</div>
+              <div className="truncate text-[11px] text-slate-400">Sheet name: {selectedPlayer || '—'}</div>
+            </div>
+            <span className="ml-auto rounded-full bg-white px-2.5 py-1 text-[11px] font-semibold text-slate-500 shadow-sm">
+              {index.dates.length} day{index.dates.length === 1 ? '' : 's'} · {index.locations.length} location{index.locations.length === 1 ? '' : 's'} searched
+            </span>
           </div>
         </div>
 
