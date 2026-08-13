@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import Head from 'next/head'
 import CourtGrid from '../components/CourtGrid'
-import CourtSchedule from '../components/CourtSchedule'
+import CourtCardCarousel from '../components/CourtCardCarousel'
 import GroupBookingModal from '../components/GroupBookingModal'
 import PlayerSwitcher from '../components/PlayerSwitcher'
 import PlayerReservationsModal from '../components/PlayerReservationsModal'
 import DayCarousel from '../components/DayCarousel'
+import DaySlide from '../components/DaySlide'
 import {
   laNow,
   laDayOffset,
@@ -424,7 +425,12 @@ export default function Home() {
     setSelectedCourt(id)
   }
 
-  const selectedCourtIndex = courts.findIndex((court) => court.id === selectedCourt)
+  // A refresh can drop a court that was open; never leave the carousel on a
+  // court that is no longer in the selected location/day.
+  useEffect(() => {
+    if (selectedCourt == null) return
+    if (!courts.length || !courts.some((court) => court.id === selectedCourt)) setSelectedCourt(null)
+  }, [courts, selectedCourt])
 
   // --- Atomic group booking / cancellation --------------------------------
   // The optimistic UI change is applied immediately, then the whole group is
@@ -663,17 +669,20 @@ export default function Home() {
   }
 
   // Called by the CourtSchedule modal when a slot is tapped.
-  function handleOpenBooking({ mode, slots, players }) {
+  function handleOpenBooking({ mode, slots, players, courtId, location, date }) {
+    const bookingCourt = courtId ?? selectedCourt
+    const bookingLocation = location || selectedLocation
+    const bookingDate = date || selectedDay
     if (viewOnlyDate) {
       alert('This day is view only — bookings and cancellations are only available for today and tomorrow.')
       return
     }
-    const dateObj = dateKeyToLocalDate(selectedDay)
+    const dateObj = dateKeyToLocalDate(bookingDate)
     const validation = validateBooking({
       action: mode,
-      location: selectedLocation,
-      date: selectedDay,
-      courtId: selectedCourt,
+      location: bookingLocation,
+      date: bookingDate,
+      courtId: bookingCourt,
       slots,
       names: mode === 'cancel' ? players : [currentPlayer],
       staffApproved: false,
@@ -687,13 +696,13 @@ export default function Home() {
     setBookingModal({
       origin: 'schedule',
       mode,
-      location: selectedLocation,
-      date: selectedDay,
-      courtId: selectedCourt,
+      location: bookingLocation,
+      date: bookingDate,
+      courtId: bookingCourt,
       slots,
       players,
-      title: mode === 'cancel' ? `Cancel Court ${selectedCourt}` : `Book Court ${selectedCourt}`,
-      subtitle: `${selectedLocation} · ${formatDateLong(dateObj)}`,
+      title: mode === 'cancel' ? `Cancel Court ${bookingCourt}` : `Book Court ${bookingCourt}`,
+      subtitle: `${bookingLocation} · ${formatDateLong(dateObj)}`,
     })
   }
 
@@ -735,7 +744,7 @@ export default function Home() {
             <img src={LOGO_URL} alt="USTA logo" className="h-9 w-9 sm:h-10 sm:w-10 rounded-full border border-white/20 bg-white/10 object-cover shrink-0" />
             <div className="min-w-0">
               <div className="text-sm sm:text-base lg:text-lg font-semibold tracking-tight text-white truncate">USTA Girl&apos;s National Championships</div>
-              <div className="text-xs uppercase tracking-[0.15em] text-slate-400 truncate">{selectedLocation || 'Practice Courts'}</div>
+              <div className="text-xs uppercase tracking-[0.15em] text-slate-400 truncate">Practice Courts</div>
             </div>
           </div>
           <div className="flex flex-wrap lg:flex-nowrap justify-center items-center gap-2 text-sm shrink-0">
@@ -899,15 +908,35 @@ export default function Home() {
 
         {/* Court Grid */}
         <section className="mb-6">
-          {courts.length === 0 ? (
-            <div className="mx-auto max-w-md rounded-2xl border border-dashed border-slate-300 bg-white/60 px-6 py-10 text-center text-sm text-slate-500">
-              No courts are set up for {selectedLocation} on this day yet.
-            </div>
-          ) : (
-            <div className="flex justify-center">
-              <CourtGrid courts={courts} reservations={reservations} onSelect={handleSelectCourt} selectedCourt={selectedCourt} completedSlots={completedSlots} />
-            </div>
-          )}
+          <DaySlide
+            dayKey={selectedDay}
+            canSwipeLeft={Boolean(selectedDay) && days.findIndex((d) => d.key === selectedDay) < days.length - 1}
+            canSwipeRight={Boolean(selectedDay) && days.findIndex((d) => d.key === selectedDay) > 0}
+            onSwipeLeft={() => {
+              const index = days.findIndex((d) => d.key === selectedDay)
+              if (index >= 0 && index < days.length - 1) {
+                setSelectedDay(days[index + 1].key)
+                setSelectedCourt(null)
+              }
+            }}
+            onSwipeRight={() => {
+              const index = days.findIndex((d) => d.key === selectedDay)
+              if (index > 0) {
+                setSelectedDay(days[index - 1].key)
+                setSelectedCourt(null)
+              }
+            }}
+          >
+            {courts.length === 0 ? (
+              <div className="mx-auto max-w-md rounded-2xl border border-dashed border-slate-300 bg-white/60 px-6 py-10 text-center text-sm text-slate-500">
+                No courts are set up for {selectedLocation} on this day yet.
+              </div>
+            ) : (
+              <div className="flex justify-center">
+                <CourtGrid courts={courts} reservations={reservations} onSelect={handleSelectCourt} selectedCourt={selectedCourt} completedSlots={completedSlots} />
+              </div>
+            )}
+          </DaySlide>
         </section>
 
         {/* Info Section */}
@@ -1200,8 +1229,10 @@ export default function Home() {
       )}
 
       {selectedCourt && (
-        <CourtSchedule
-          court={selectedCourt}
+        <CourtCardCarousel
+          courts={courts}
+          selectedCourt={selectedCourt}
+          onSelectCourt={setSelectedCourt}
           date={selectedDay}
           location={selectedLocation}
           reservations={reservations}
@@ -1214,10 +1245,6 @@ export default function Home() {
           completedSlots={completedSlots}
           barnesOnly30={isBarnesLocation(selectedLocation)}
           onOpenBooking={handleOpenBooking}
-          canGoPrevious={selectedCourtIndex > 0}
-          canGoNext={selectedCourtIndex >= 0 && selectedCourtIndex < courts.length - 1}
-          onPreviousCourt={() => setSelectedCourt(courts[selectedCourtIndex - 1].id)}
-          onNextCourt={() => setSelectedCourt(courts[selectedCourtIndex + 1].id)}
           onClose={() => setSelectedCourt(null)}
         />
       )}

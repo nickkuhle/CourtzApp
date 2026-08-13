@@ -1,8 +1,9 @@
-import React, { useEffect } from 'react'
+import React, { useEffect, useRef } from 'react'
 import { existingPlayerSessions, MAX_SESSIONS_PER_DAY } from '../lib/booking-rules'
 import PlayerChip from './PlayerChip'
 import PlayerSwitcher from './PlayerSwitcher'
-import { courtSessionBlocks, formatPlayerName } from '../lib/schedule-display'
+import useTickingNow from './useTickingNow'
+import { courtSessionBlocks, describeFocusedSession, formatPlayerName } from '../lib/schedule-display'
 
 function formatTimeLabel(totalMinutes) {
   const hours = Math.floor(totalMinutes / 60)
@@ -108,35 +109,108 @@ function Slot({ time, reservedBy = [], currentPlayer, onClick, disabled, ended, 
   )
 }
 
+function ReservedSessionsCarousel({ blocks, currentPlayer, dateKey, nowMs }) {
+  const scrollerRef = useRef(null)
+  const cardRefs = useRef([])
+  const focused = describeFocusedSession(blocks, { dateKey, nowMs })
+
+  useEffect(() => {
+    const card = cardRefs.current[focused.index]
+    if (!card || !scrollerRef.current) return
+    const scroller = scrollerRef.current
+    const left = card.offsetLeft - (scroller.clientWidth - card.offsetWidth) / 2
+    scroller.scrollTo({ left: Math.max(0, left), behavior: 'smooth' })
+  }, [focused.index, dateKey, blocks.length])
+
+  if (!blocks.length) return null
+
+  return (
+    <div className="shrink-0 border-b border-slate-100 bg-slate-50/80 px-4 py-3 sm:px-6 sm:py-4">
+      <div className="mb-2 flex items-center justify-between gap-3">
+        <div>
+          <h3 className="text-xs font-bold uppercase tracking-wider text-slate-600">Reserved sessions</h3>
+          <p className="text-[11px] text-slate-400">Swipe to see every reservation. The current or next session is shown first.</p>
+        </div>
+        <span className="rounded-full bg-white px-2.5 py-1 text-xs font-bold text-slate-500 shadow-sm">{blocks.length}</span>
+      </div>
+      <div
+        ref={scrollerRef}
+        data-horizontal-carousel
+        className="hide-scrollbar flex snap-x snap-mandatory gap-2 overflow-x-auto overscroll-x-contain pb-0.5"
+      >
+        {blocks.map((block, index) => {
+          const mine = block.players.includes(currentPlayer)
+          const isFocused = index === focused.index
+          const badge = focused.kind === 'current' && isFocused
+            ? 'Now'
+            : focused.kind === 'next' && isFocused
+              ? 'Next'
+              : null
+          return (
+            <div
+              key={`${block.start}|${block.slots.join(',')}`}
+              ref={(el) => { cardRefs.current[index] = el }}
+              className={`w-[min(16.5rem,78%)] shrink-0 snap-center rounded-xl border px-3 py-2.5 ${
+                mine ? 'border-emerald-300 bg-emerald-50' : 'border-slate-200 bg-white'
+              } ${isFocused ? 'ring-2 ring-emerald-400/80' : ''}`}
+            >
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-sm font-bold text-slate-800">{block.timeRange}</span>
+                <div className="flex items-center gap-1">
+                  {badge && (
+                    <span className={`rounded-full px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide ${
+                      badge === 'Now' ? 'bg-emerald-500 text-white' : 'bg-sky-100 text-sky-700'
+                    }`}>
+                      {badge}
+                    </span>
+                  )}
+                  <span className="text-[10px] font-bold uppercase tracking-wide text-slate-400">{block.slots.length === 2 ? '60 min' : '30 min'}</span>
+                </div>
+              </div>
+              <div className="mt-2 flex flex-wrap gap-1.5">
+                {block.players.map((name) => <PlayerChip key={name} name={name} compact highlight={name === currentPlayer} />)}
+              </div>
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
 // Slot clicks are handed to the parent, which opens the shared group-booking
 // dialog: open slots start a booking with the signed-in player; slots the
 // signed-in player already holds open the cancellation dialog for the whole
 // group booked in that slot. Days outside today/tomorrow and 30-minute slots
 // that have already ended are view-only: they can be inspected but never
 // booked or canceled.
-export default function CourtSchedule({ court, date, location, reservations, currentPlayer = 'Alice Johnson', roster = [], onSelectPlayer, pendingReservations = {}, practiceLocations = null, viewOnly = false, completedSlots = null, barnesOnly30 = false, onOpenBooking, onPreviousCourt, onNextCourt, canGoPrevious = false, canGoNext = false, onClose }) {
-  // Hooks must run unconditionally, before the early return below: returning
-  // first would break the Rules of Hooks (and crash with "Rendered fewer hooks
-  // than expected") if this component ever stayed mounted while court is null.
-  useEffect(() => {
-    function handleKeyDown(event) {
-      if (event.key === 'ArrowLeft' && canGoPrevious) onPreviousCourt?.()
-      if (event.key === 'ArrowRight' && canGoNext) onNextCourt?.()
-      if (event.key === 'Escape') onClose?.()
-    }
-    window.addEventListener('keydown', handleKeyDown)
-    return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [canGoPrevious, canGoNext, onPreviousCourt, onNextCourt, onClose])
+export default function CourtSchedule({
+  court,
+  date,
+  location,
+  reservations,
+  currentPlayer = 'Alice Johnson',
+  roster = [],
+  onSelectPlayer,
+  pendingReservations = {},
+  practiceLocations = null,
+  viewOnly = false,
+  completedSlots = null,
+  barnesOnly30 = false,
+  onOpenBooking,
+  onPreviousCourt,
+  onNextCourt,
+  canGoPrevious = false,
+  canGoNext = false,
+  onClose,
+}) {
+  const nowMs = useTickingNow()
 
   if (!court) return null
 
-  // Count slots for summary
   const key = `${location}|${date}|${court}`
   const reserved = reservations[key] || {}
 
-  // Practice sessions already used by this player today (max 2). Barnes
-  // 30-minute slots count one each; elsewhere two consecutive 30-minute slots
-  // on the same court count as a single session.
   const sessionsUsed = existingPlayerSessions(reservations, {
     dateKey: date,
     name: currentPlayer,
@@ -155,8 +229,8 @@ export default function CourtSchedule({ court, date, location, reservations, cur
   const sessionBlocks = courtSessionBlocks(reservations, { dateKey: date, location, court })
 
   const slots = []
-  const start = 8 * 60 // 8:00
-  const end = 18 * 60 // 6:00 PM
+  const start = 8 * 60
+  const end = 18 * 60
   for (let t = start; t <= end; t += 30) {
     const endTime = t + 30
     const startLabel = formatTimeLabel(t)
@@ -165,175 +239,138 @@ export default function CourtSchedule({ court, date, location, reservations, cur
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-start md:items-center justify-center overflow-auto">
-      <div className="absolute inset-0 bg-slate-900/60 backdrop-blur-sm" onClick={onClose} />
-      <div className="relative bg-white rounded-2xl shadow-2xl max-w-2xl w-full mx-4 my-8 max-h-[calc(100vh-4rem)] overflow-hidden flex flex-col">
-        {/* Header */}
-        <div className="bg-gradient-to-br from-[#1f5f99] to-[#164a7a] px-6 py-5 shrink-0">
-          <div className="flex justify-between items-start">
-            <div>
-              <h2 className="text-2xl font-bold text-white">Court {court}</h2>
-              <div className="text-sm text-blue-200 mt-0.5">{location}</div>
-              <div className="text-sm text-blue-200">{date}</div>
-            </div>
-            <div className="flex items-center gap-1.5">
-              <button
-                type="button"
-                onClick={onPreviousCourt}
-                disabled={!canGoPrevious}
-                aria-label="Previous court"
-                title="Previous court (←)"
-                className="rounded-lg bg-white/10 hover:bg-white/20 p-2 text-white disabled:cursor-not-allowed disabled:opacity-30 transition"
-              >
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="15 18 9 12 15 6" /></svg>
-              </button>
-              <button
-                type="button"
-                onClick={onNextCourt}
-                disabled={!canGoNext}
-                aria-label="Next court"
-                title="Next court (→)"
-                className="rounded-lg bg-white/10 hover:bg-white/20 p-2 text-white disabled:cursor-not-allowed disabled:opacity-30 transition"
-              >
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="9 18 15 12 9 6" /></svg>
-              </button>
-              <button onClick={onClose} className="rounded-lg bg-white/10 hover:bg-white/20 p-2 text-white transition ml-1" aria-label="Close">
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg>
-              </button>
-            </div>
+    <div className="relative flex h-full min-h-0 w-full flex-col overflow-hidden rounded-2xl bg-white shadow-2xl">
+      <div className="bg-gradient-to-br from-[#1f5f99] to-[#164a7a] px-5 py-4 shrink-0 sm:px-6 sm:py-5">
+        <div className="flex justify-between items-start">
+          <div>
+            <h2 className="text-2xl font-bold text-white">Court {court}</h2>
+            <div className="text-sm text-blue-200 mt-0.5">{location}</div>
+            <div className="text-sm text-blue-200">{date}</div>
           </div>
-
-          {/* Summary bar */}
-          <div className="flex flex-wrap gap-3 mt-4">
-            <div className="flex items-center gap-1.5 rounded-full bg-white/10 px-3 py-1.5 text-xs font-medium text-white">
-              <span className="w-2 h-2 rounded-full bg-emerald-400" />
-              {totalSlots - bookedCount} open
-            </div>
-            <div className="flex items-center gap-1.5 rounded-full bg-white/10 px-3 py-1.5 text-xs font-medium text-white">
-              <span className="w-2 h-2 rounded-full bg-red-400" />
-              {bookedCount} booked
-            </div>
-            {myCount > 0 && (
-              <div className="flex items-center gap-1.5 rounded-full bg-emerald-400/20 px-3 py-1.5 text-xs font-medium text-emerald-200">
-                <span className="w-2 h-2 rounded-full bg-emerald-300" />
-                {myCount} yours
-              </div>
-            )}
-            <div
-              className="flex items-center gap-1.5 rounded-full bg-white/10 px-3 py-1.5 text-xs font-medium text-white"
-              title="Practice sessions used by this player today (max 2)"
+          <div className="flex items-center gap-1.5">
+            <button
+              type="button"
+              data-no-swipe
+              onClick={onPreviousCourt}
+              disabled={!canGoPrevious}
+              aria-label="Previous court"
+              title="Previous court (←)"
+              className="rounded-lg bg-white/10 hover:bg-white/20 p-2 text-white disabled:cursor-not-allowed disabled:opacity-30 transition"
             >
-              <span className="w-2 h-2 rounded-full bg-amber-300" />
-              {Math.min(sessionsUsed, MAX_SESSIONS_PER_DAY)}/{MAX_SESSIONS_PER_DAY} sessions today
-            </div>
-            {viewOnly && (
-              <div className="flex items-center gap-1.5 rounded-full bg-amber-400/20 px-3 py-1.5 text-xs font-medium text-amber-200">
-                View only — bookings are allowed for today and tomorrow only
-              </div>
-            )}
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="15 18 9 12 15 6" /></svg>
+            </button>
+            <button
+              type="button"
+              data-no-swipe
+              onClick={onNextCourt}
+              disabled={!canGoNext}
+              aria-label="Next court"
+              title="Next court (→)"
+              className="rounded-lg bg-white/10 hover:bg-white/20 p-2 text-white disabled:cursor-not-allowed disabled:opacity-30 transition"
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="9 18 15 12 9 6" /></svg>
+            </button>
+            <button type="button" data-no-swipe onClick={onClose} className="rounded-lg bg-white/10 hover:bg-white/20 p-2 text-white transition ml-1" aria-label="Close">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg>
+            </button>
           </div>
         </div>
 
-        {/* Controls */}
-        <div className="px-6 py-4 border-b border-slate-100 shrink-0">
-          <div className="flex flex-wrap items-center gap-3">
-            <PlayerSwitcher
-              currentPlayer={currentPlayer}
-              roster={roster}
-              onSelect={onSelectPlayer}
-              appearance="light"
-              sessionsLabel={`${Math.min(sessionsUsed, MAX_SESSIONS_PER_DAY)}/${MAX_SESSIONS_PER_DAY} sessions`}
-            />
-            <span className="ml-auto rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-500">
-              {barnesOnly30 ? '30-minute times — Barnes allows one 30-minute session per reservation' : '30-minute times'}
-            </span>
+        <div className="flex flex-wrap gap-3 mt-4">
+          <div className="flex items-center gap-1.5 rounded-full bg-white/10 px-3 py-1.5 text-xs font-medium text-white">
+            <span className="w-2 h-2 rounded-full bg-emerald-400" />
+            {totalSlots - bookedCount} open
           </div>
+          <div className="flex items-center gap-1.5 rounded-full bg-white/10 px-3 py-1.5 text-xs font-medium text-white">
+            <span className="w-2 h-2 rounded-full bg-red-400" />
+            {bookedCount} booked
+          </div>
+          {myCount > 0 && (
+            <div className="flex items-center gap-1.5 rounded-full bg-emerald-400/20 px-3 py-1.5 text-xs font-medium text-emerald-200">
+              <span className="w-2 h-2 rounded-full bg-emerald-300" />
+              {myCount} yours
+            </div>
+          )}
+          <div
+            className="flex items-center gap-1.5 rounded-full bg-white/10 px-3 py-1.5 text-xs font-medium text-white"
+            title="Practice sessions used by this player today (max 2)"
+          >
+            <span className="w-2 h-2 rounded-full bg-amber-300" />
+            {Math.min(sessionsUsed, MAX_SESSIONS_PER_DAY)}/{MAX_SESSIONS_PER_DAY} sessions today
+          </div>
+          {viewOnly && (
+            <div className="flex items-center gap-1.5 rounded-full bg-amber-400/20 px-3 py-1.5 text-xs font-medium text-amber-200">
+              View only — bookings are allowed for today and tomorrow only
+            </div>
+          )}
         </div>
+      </div>
 
-        {/* Consecutive non-Barnes slots are summarized as a single 60-minute
-            session. Barnes reservations always remain individual 30-minute
-            blocks. The slot grid below stays available for the existing book
-            and cancel interactions. */}
-        {sessionBlocks.length > 0 && (
-          <div className="shrink-0 border-b border-slate-100 bg-slate-50/80 px-6 py-4">
-            <div className="mb-2 flex items-center justify-between gap-3">
-              <div>
-                <h3 className="text-xs font-bold uppercase tracking-wider text-slate-600">Reserved sessions</h3>
-                <p className="text-[11px] text-slate-400">Consecutive times are grouped by player.</p>
-              </div>
-              <span className="rounded-full bg-white px-2.5 py-1 text-xs font-bold text-slate-500 shadow-sm">{sessionBlocks.length}</span>
-            </div>
-            <div className="grid max-h-40 gap-2 overflow-auto sm:grid-cols-2">
-              {sessionBlocks.map((block) => {
-                const mine = block.players.includes(currentPlayer)
-                return (
-                  <div
-                    key={`${block.start}|${block.slots.join(',')}`}
-                    className={`rounded-xl border px-3 py-2.5 ${mine ? 'border-emerald-300 bg-emerald-50' : 'border-slate-200 bg-white'}`}
-                  >
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="text-sm font-bold text-slate-800">{block.timeRange}</span>
-                      <span className="text-[10px] font-bold uppercase tracking-wide text-slate-400">{block.slots.length === 2 ? '60 min' : '30 min'}</span>
-                    </div>
-                    <div className="mt-2 flex flex-wrap gap-1.5">
-                      {block.players.map((name) => <PlayerChip key={name} name={name} compact highlight={name === currentPlayer} />)}
-                    </div>
-                  </div>
-                )
-              })}
-            </div>
-          </div>
-        )}
+      <div className="px-5 py-3 border-b border-slate-100 shrink-0 sm:px-6 sm:py-4">
+        <div className="flex flex-wrap items-center gap-3">
+          <PlayerSwitcher
+            currentPlayer={currentPlayer}
+            roster={roster}
+            onSelect={onSelectPlayer}
+            appearance="navbar"
+            sessionsLabel={`${Math.min(sessionsUsed, MAX_SESSIONS_PER_DAY)}/${MAX_SESSIONS_PER_DAY} sessions`}
+          />
+          <span className="ml-auto rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-500">
+            {barnesOnly30 ? '30-minute times — Barnes allows one 30-minute session per reservation' : '30-minute times'}
+          </span>
+        </div>
+      </div>
 
-        {/* Slot grid */}
-        <div className="p-6 overflow-auto flex-1">
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            {slots.map((slot) => {
-              const players = reserved[slot.label] || []
-              const ended = completedSlots ? completedSlots.has(slot.label) : false
-              const isOwnedByCurrentPlayer = players.includes(currentPlayer)
-              const isReservedBySomeoneElse = players.length > 0 && !isOwnedByCurrentPlayer
-              // Pending writes are keyed "mode|location|date|court|slots|names"
-              // in handleGroupWrite (pages/index.js). A booking may also carry
-              // extra players, and a cancel carries the whole group, so match
-              // by prefix for this court + slot rather than one exact key.
-              const slotPrefix = `${key}|${slot.label}|`
-              const isSaving = Object.keys(pendingReservations).some(
-                (k) => k.startsWith(`book|${slotPrefix}`) || k.startsWith(`cancel|${slotPrefix}`)
-              )
-              return (
-                <Slot
-                  key={slot.label}
-                  time={slot.label}
-                  reservedBy={players}
-                  currentPlayer={currentPlayer}
-                  disabled={isReservedBySomeoneElse || isSaving}
-                  ended={ended}
-                  isOwnedByCurrentPlayer={isOwnedByCurrentPlayer}
-                  isSaving={isSaving}
-                  onClick={() => {
-                    if (ended) {
-                      alert('That time has already ended and can no longer be booked or canceled.')
-                      return
-                    }
-                    if (viewOnly) {
-                      alert('This day is view only — bookings and cancellations are only available for today and tomorrow.')
-                      return
-                    }
-                    if (isReservedBySomeoneElse) {
-                      alert(`That slot is reserved by ${players.map(formatPlayerName).join(', ')}. You can only manage your own bookings.`)
-                      return
-                    }
-                    if (isOwnedByCurrentPlayer) {
-                      onOpenBooking({ mode: 'cancel', slots: [slot.label], players: [...new Set(players)] })
-                      return
-                    }
-                    onOpenBooking({ mode: 'book', slots: [slot.label], players: [currentPlayer] })
-                  }}
-                />
-              )
-            })}
-          </div>
+      <ReservedSessionsCarousel
+        blocks={sessionBlocks}
+        currentPlayer={currentPlayer}
+        dateKey={date}
+        nowMs={nowMs}
+      />
+
+      <div className="flex-1 overflow-auto p-5 pb-14 sm:p-6 sm:pb-14">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          {slots.map((slot) => {
+            const players = reserved[slot.label] || []
+            const ended = completedSlots ? completedSlots.has(slot.label) : false
+            const isOwnedByCurrentPlayer = players.includes(currentPlayer)
+            const isReservedBySomeoneElse = players.length > 0 && !isOwnedByCurrentPlayer
+            const slotPrefix = `${key}|${slot.label}|`
+            const isSaving = Object.keys(pendingReservations).some(
+              (k) => k.startsWith(`book|${slotPrefix}`) || k.startsWith(`cancel|${slotPrefix}`)
+            )
+            return (
+              <Slot
+                key={slot.label}
+                time={slot.label}
+                reservedBy={players}
+                currentPlayer={currentPlayer}
+                disabled={isReservedBySomeoneElse || isSaving}
+                ended={ended}
+                isOwnedByCurrentPlayer={isOwnedByCurrentPlayer}
+                isSaving={isSaving}
+                onClick={() => {
+                  if (ended) {
+                    alert('That time has already ended and can no longer be booked or canceled.')
+                    return
+                  }
+                  if (viewOnly) {
+                    alert('This day is view only — bookings and cancellations are only available for today and tomorrow.')
+                    return
+                  }
+                  if (isReservedBySomeoneElse) {
+                    alert(`That slot is reserved by ${players.map(formatPlayerName).join(', ')}. You can only manage your own bookings.`)
+                    return
+                  }
+                  if (isOwnedByCurrentPlayer) {
+                    onOpenBooking({ mode: 'cancel', slots: [slot.label], players: [...new Set(players)], courtId: court, location, date })
+                    return
+                  }
+                  onOpenBooking({ mode: 'book', slots: [slot.label], players: [currentPlayer], courtId: court, location, date })
+                }}
+              />
+            )
+          })}
         </div>
       </div>
     </div>

@@ -139,7 +139,7 @@ export default function GroupBookingModal({
   const label = confirmLabel || (mode === 'cancel' ? 'Cancel group booking' : `Book for ${players.length} player${players.length === 1 ? '' : 's'}`)
 
   return (
-    <div className="fixed inset-0 z-[60] flex items-start md:items-center justify-center overflow-auto">
+    <div data-booking-modal className="fixed inset-0 z-[60] flex items-start md:items-center justify-center overflow-auto">
       <div className="absolute inset-0 bg-slate-900/60 backdrop-blur-sm" onClick={busy ? undefined : onClose} />
       <div className="relative bg-white rounded-2xl shadow-2xl max-w-lg w-full mx-4 my-8 overflow-hidden">
         {/* Header */}
