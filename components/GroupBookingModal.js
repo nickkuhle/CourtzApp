@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react'
+import React, { useEffect, useMemo, useState } from 'react'
 import PlayerChip from './PlayerChip'
 import { formatPlayerName } from '../lib/schedule-display'
 
@@ -31,17 +31,9 @@ function ShieldAlertIcon() {
 }
 
 // Shared "who is booking?" dialog used by both the court schedule and Find a
-// Court. It always starts with the signed-in player, lets the desk search the
-// roster and add more players, then shows every selected player before the
-// booking is confirmed. The parent performs the atomic write (bookGroup or
-// cancelGroup) so the whole group succeeds or fails together.
-//
-// Session rules are evaluated live through `evaluate(players)`, which returns
-// { ok, warning, error }. A hard error (e.g. a player would exceed the
-// 2-sessions-per-day maximum) blocks the booking entirely. A warning (the new
-// session is back-to-back with, or starts within one hour of, another session)
-// opens the tournament-staff approval step: the booking may only continue with
-// the explicit "Confirm — staff approved" action.
+// Court. Now includes proper staff-code prompt: when a booking is within 1 hour
+// of the SAME player's own session, it requires staff approval; if a staff code
+// is configured, the prompt asks for that code to bypass.
 export default function GroupBookingModal({
   title = 'Book a court',
   subtitle = '',
@@ -65,6 +57,10 @@ export default function GroupBookingModal({
   const [staffCodeRequired, setStaffCodeRequired] = useState(Boolean(requiresStaffCode))
   const [staffCode, setStaffCode] = useState('')
 
+  useEffect(() => {
+    setStaffCodeRequired(Boolean(requiresStaffCode))
+  }, [requiresStaffCode])
+
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase()
     const selected = new Set(players)
@@ -87,7 +83,7 @@ export default function GroupBookingModal({
   }
 
   function removePlayer(name) {
-    if (mode === 'cancel') return // the whole group is canceled together
+    if (mode === 'cancel') return
     setPlayers(prev => prev.filter(n => n !== name))
     setError(null)
   }
@@ -103,8 +99,6 @@ export default function GroupBookingModal({
         return
       }
       if (evaluation.warning) {
-        // Close-timing warning: the booking may only continue after an
-        // explicit tournament-staff approval.
         setStaffStep(true)
         return
       }
@@ -120,15 +114,26 @@ export default function GroupBookingModal({
     setError(null)
     try {
       await onConfirm(players, { staffApproved, staffCode: staffApproved ? staffCode : null })
-      // Parent closes the modal on success; keep it open on failure so the desk
-      // can retry or adjust the group.
     } catch (e) {
-      if (e?.staffCodeRequired || e?.code === 'STAFF_APPROVAL_CODE_REQUIRED' || e?.code === 'STAFF_APPROVAL_CODE_INVALID') {
-        // The server is the source of truth for whether approval is protected.
-        // Keep the selected players and all booking fields intact while staff
-        // enters or corrects the code.
-        setStaffCodeRequired(true)
+      const code = e?.code
+      const needsCode = e?.staffCodeRequired || code === 'STAFF_APPROVAL_CODE_REQUIRED' || code === 'STAFF_APPROVAL_CODE_INVALID' || code === 'STAFF_APPROVAL_REQUIRED'
+      if (needsCode) {
+        // Ensure we stay on staff approval step and prompt for code if required by server
+        if (e?.staffCodeRequired) setStaffCodeRequired(true)
+        // If server said STAFF_APPROVAL_REQUIRED but we weren't in staff step, move to it
+        if (code === 'STAFF_APPROVAL_REQUIRED') {
+          // Keep existing staffCodeRequired value (may be true if env configured)
+          setStaffStep(true)
+        }
+        if (code === 'STAFF_APPROVAL_CODE_REQUIRED' || code === 'STAFF_APPROVAL_CODE_INVALID') {
+          setStaffCodeRequired(true)
+          setStaffStep(true)
+        }
+      }
+      // If error is about staff approval, ensure we are in staff step to show code prompt
+      if (code === 'STAFF_APPROVAL_REQUIRED' || code === 'STAFF_APPROVAL_CODE_REQUIRED' || code === 'STAFF_APPROVAL_CODE_INVALID' || e?.staffCodeRequired) {
         setStaffStep(true)
+        if (e?.staffCodeRequired) setStaffCodeRequired(true)
       }
       setError(e?.message || 'The booking could not be saved. Please try again.')
     } finally {
@@ -172,8 +177,7 @@ export default function GroupBookingModal({
                 <div>
                   <div className="text-sm font-bold text-amber-900">Tournament staff approval required</div>
                   <p className="mt-1 text-sm text-amber-800 leading-relaxed">
-                    {evaluation.warning} This booking is within one hour of another practice session
-                    (back-to-back sessions included) and may only continue with tournament staff approval.
+                    {evaluation.warning || 'This booking is within one hour of another session for the same player.'} Back-to-back or bookings within one hour for the <span className="font-bold">same player only</span> need staff approval. If Player A has a session ending at 12:00 and tries to book 12:30, it needs approval. If a different player has a session at that time, it does NOT trigger this warning.
                   </p>
                 </div>
               </div>
@@ -183,30 +187,36 @@ export default function GroupBookingModal({
               <span className="font-semibold text-slate-800">{subtitle}</span> for{' '}
               <span className="font-semibold text-slate-800">{players.map(formatPlayerName).join(', ')}</span>.
             </div>
-            {staffCodeRequired && (
-              <div>
-                <label htmlFor="staff-approval-code" className="block text-xs font-semibold uppercase tracking-wider text-slate-600 mb-2">
-                  Staff approval code
-                </label>
-                <input
-                  id="staff-approval-code"
-                  type="password"
-                  autoComplete="off"
-                  autoFocus
-                  value={staffCode}
-                  onChange={(event) => { setStaffCode(event.target.value); setError(null) }}
-                  onKeyDown={(event) => {
-                    if (event.key === 'Enter' && staffCode.trim() && !saving && !busy) {
-                      event.preventDefault()
-                      runConfirm(true)
-                    }
-                  }}
-                  placeholder="Enter the tournament staff code"
-                  className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2.5 text-sm text-slate-800 focus:border-amber-500 focus:outline-none focus:ring-2 focus:ring-amber-200"
-                />
-                <p className="mt-1.5 text-xs text-slate-500">Ask tournament staff for the approval code, then try again.</p>
-              </div>
-            )}
+
+            {/* Staff code prompt — always visible when approval needed, required indicator when server says code needed */}
+            <div className="rounded-xl border border-amber-200 bg-white px-4 py-3">
+              <label htmlFor="staff-approval-code" className="block text-xs font-semibold uppercase tracking-wider text-slate-600 mb-2">
+                Staff approval code {staffCodeRequired ? <span className="text-rose-600 normal-case">(required)</span> : <span className="text-slate-400 normal-case">(optional unless configured)</span>}
+              </label>
+              <input
+                id="staff-approval-code"
+                type="password"
+                autoComplete="off"
+                autoFocus
+                value={staffCode}
+                onChange={(event) => { setStaffCode(event.target.value); setError(null) }}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter' && !saving && !busy) {
+                    event.preventDefault()
+                    // Allow confirm with empty code only if not required
+                    if (!staffCodeRequired || staffCode.trim()) runConfirm(true)
+                  }
+                }}
+                placeholder={staffCodeRequired ? "Enter the tournament staff code to bypass" : "Enter staff code if configured, or leave blank to confirm approval"}
+                className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2.5 text-sm text-slate-800 focus:border-amber-500 focus:outline-none focus:ring-2 focus:ring-amber-200"
+              />
+              <p className="mt-1.5 text-xs text-slate-500">
+                {staffCodeRequired
+                  ? 'A staff approval code is configured for this tournament. Ask tournament staff for the code, then verify to continue.'
+                  : 'If no staff code is configured, you can confirm staff approval without a code. If a code IS configured, you must enter it here.'}
+              </p>
+            </div>
+
             {error && (
               <div className="rounded-xl border border-red-200 bg-red-50 px-3 py-2.5 text-sm text-red-700" role="alert">
                 {error}
@@ -305,13 +315,11 @@ export default function GroupBookingModal({
                     )}
                   </div>
                   <p className="mt-1.5 text-xs text-slate-400">
-                    {players.length} of {roster.length} players selected
+                    {players.length} of {roster.length} players selected — each slot holds up to 4 players.
                   </p>
                 </div>
               )}
 
-              {/* Live rule feedback: hard errors block the booking, warnings
-                  explain the staff-approval step that follows on confirm. */}
               {mode === 'book' && evaluation.error && (
                 <div className="rounded-xl border border-red-200 bg-red-50 px-3 py-2.5 text-sm text-red-700" role="alert">
                   {evaluation.error}
@@ -319,7 +327,7 @@ export default function GroupBookingModal({
               )}
               {mode === 'book' && !evaluation.error && evaluation.warning && (
                 <div className="rounded-xl border border-amber-300 bg-amber-50 px-3 py-2.5 text-sm text-amber-800" role="alert">
-                  <span className="font-semibold">Staff approval needed:</span> {evaluation.warning} You will be asked to confirm tournament staff approval.
+                  <span className="font-semibold">Staff approval needed (same player only):</span> {evaluation.warning} You will be asked to confirm tournament staff approval and enter a staff code if required.
                 </div>
               )}
 

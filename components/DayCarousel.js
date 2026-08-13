@@ -1,10 +1,10 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import useHorizontalSwipe from './useHorizontalSwipe'
 
 const GAP_PX = 8
 const ITEM_WIDTH_PX = 112
 
-function Arrow({ direction, disabled, onClick, label }) {
+const Arrow = React.memo(function Arrow({ direction, disabled, onClick, label }) {
   return (
     <button
       type="button"
@@ -19,12 +19,10 @@ function Arrow({ direction, disabled, onClick, label }) {
       </svg>
     </button>
   )
-}
+})
 
-// Compact two-day carousel. The selected day stays in view and the track
-// slides when the day changes. Arrows and a left/right swipe flip the
-// selected date instead of only panning the window.
-export default function DayCarousel({
+// Compact two-day carousel with memoization for performance
+const DayCarousel = React.memo(function DayCarousel({
   days = [],
   selectedDay,
   onSelect,
@@ -58,10 +56,10 @@ export default function DayCarousel({
   const canPrev = selectedIndex > 0
   const canNext = selectedIndex < days.length - 1
 
-  function selectOffset(delta) {
+  const selectOffset = useCallback((delta) => {
     const next = Math.min(days.length - 1, Math.max(0, selectedIndex + delta))
     if (days[next] && days[next].key !== selectedDay) onSelect?.(days[next].key)
-  }
+  }, [days, selectedDay, selectedIndex, onSelect])
 
   const { dragX, dragging, bind } = useHorizontalSwipe({
     onSwipeLeft: () => selectOffset(1),
@@ -134,4 +132,6 @@ export default function DayCarousel({
       <Arrow direction="right" label="Next day" disabled={!canNext} onClick={() => selectOffset(1)} />
     </div>
   )
-}
+})
+
+export default DayCarousel

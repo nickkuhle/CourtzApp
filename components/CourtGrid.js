@@ -5,14 +5,12 @@ import {
   courtSessionBlocks,
   currentReservationPlayers,
   describeFocusedSession,
-  formatPlayerFirstName,
   formatPlayerName,
-  playerInitials,
   playerStyle,
 } from '../lib/schedule-display'
 
 // The court SVG is portrait (140x220) inside a landscape frame, so it is
-// letterboxed. Overlay chips are positioned in that same letterboxed court
+// letterboxed. Overlay labels are positioned in that same letterboxed court
 // and keep a readable size even when the painted service boxes are small.
 const COURT_WIDTH_PCT = ((140 / 220) / (11 / 7)) * 100
 
@@ -23,15 +21,40 @@ const SERVICE_BOX_LAYOUT = [
   { left: `${(70 / 140) * 100}%`, top: `${(110 / 220) * 100}%`, width: `${(45 / 140) * 100}%`, height: `${(53.85 / 220) * 100}%` },
 ]
 
+// Converts any roster format ("Last, First" or "First Last") into
+// "Last, F" for the compact on-court overlay.
+function formatCourtLabel(rawName) {
+  const trimmed = String(rawName || '').trim()
+  if (!trimmed) return ''
+  if (trimmed.includes(',')) {
+    const [lastPart, ...firstParts] = trimmed.split(',')
+    const last = lastPart.trim()
+    const first = firstParts.join(',').trim()
+    const initial = first ? first[0].toUpperCase() : ''
+    return initial ? `${last}, ${initial}` : last
+  }
+  const parts = trimmed.split(/\s+/).filter(Boolean)
+  if (parts.length === 1) return parts[0]
+  const first = parts[0]
+  const last = parts[parts.length - 1]
+  const initial = first ? first[0].toUpperCase() : ''
+  return initial ? `${last}, ${initial}` : last
+}
+
 function CourtPlayer({ name }) {
   const style = playerStyle(name)
+  const label = formatCourtLabel(name)
   return (
-    <div className="flex max-w-full flex-col items-center justify-center px-0.5" title={formatPlayerName(name)}>
-      <span className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-[9px] font-bold shadow-sm ${style.avatar}`}>
-        {playerInitials(name)}
-      </span>
-      <span className="mt-0.5 max-w-full truncate text-[9px] font-bold leading-tight text-white drop-shadow-[0_1px_2px_rgba(15,23,42,0.85)]">
-        {formatPlayerFirstName(name)}
+    <div
+      className="flex max-w-full items-center justify-center rounded-md border border-white/80 bg-white/95 px-1.5 py-1 shadow-md backdrop-blur-sm"
+      title={formatPlayerName(name)}
+    >
+      <span
+        className="h-1.5 w-1.5 shrink-0 rounded-full"
+        style={{ background: style.fill || '#16a34a' }}
+      />
+      <span className="ml-1 max-w-[5.5rem] truncate text-[9px] font-extrabold leading-tight tracking-tight text-slate-800">
+        {label}
       </span>
     </div>
   )
@@ -66,14 +89,11 @@ function CourtGraphic({ highlight, gradientId, players = [] }) {
             const box = SERVICE_BOX_LAYOUT[index]
             if (!box || !name) return null
             return (
-              <div key={`${name}-${index}`} className="absolute flex items-center justify-center" style={box}>
+              <div key={`${name}-${index}`} className="absolute flex items-center justify-center p-0.5" style={box}>
                 <CourtPlayer name={name} />
               </div>
             )
           })}
-          <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 rounded-full bg-emerald-600 px-1.5 py-0.5 text-[8px] font-bold uppercase tracking-wide text-white shadow">
-            Now
-          </div>
         </div>
       )}
     </div>
@@ -125,7 +145,7 @@ function SessionPreview({ blocks, completedSlots, dateKey, nowMs }) {
   )
 }
 
-export default function CourtGrid({ courts, reservations, onSelect, selectedCourt, completedSlots = null }) {
+const CourtGrid = React.memo(function CourtGrid({ courts, reservations, onSelect, selectedCourt, completedSlots = null }) {
   const nowMs = useTickingNow()
   const blocksByCourt = useMemo(() => {
     const grouped = new Map()
@@ -191,4 +211,6 @@ export default function CourtGrid({ courts, reservations, onSelect, selectedCour
       </div>
     </div>
   )
-}
+})
+
+export default CourtGrid

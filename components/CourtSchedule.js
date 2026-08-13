@@ -1,9 +1,11 @@
-import React, { useEffect, useRef } from 'react'
+import React, { useEffect, useMemo, useRef } from 'react'
 import { existingPlayerSessions, MAX_SESSIONS_PER_DAY } from '../lib/booking-rules'
 import PlayerChip from './PlayerChip'
 import PlayerSwitcher from './PlayerSwitcher'
 import useTickingNow from './useTickingNow'
 import { courtSessionBlocks, describeFocusedSession, formatPlayerName } from '../lib/schedule-display'
+
+const MAX_PLAYERS_PER_SLOT = 4
 
 function formatTimeLabel(totalMinutes) {
   const hours = Math.floor(totalMinutes / 60)
@@ -48,7 +50,7 @@ function SpinnerIcon() {
   )
 }
 
-function Slot({ time, reservedBy = [], currentPlayer, onClick, disabled, ended, isOwnedByCurrentPlayer, isSaving }) {
+const Slot = React.memo(function Slot({ time, reservedBy = [], currentPlayer, onClick, disabled, ended, isOwnedByCurrentPlayer, isSaving, isFull, isPartiallyBooked }) {
   const count = Array.isArray(reservedBy) ? reservedBy.length : 0
   const busy = count > 0
 
@@ -64,15 +66,20 @@ function Slot({ time, reservedBy = [], currentPlayer, onClick, disabled, ended, 
     badgeText = 'Ended'
     badgeIcon = <LockIcon />
   } else if (isOwnedByCurrentPlayer) {
-    containerClasses = 'bg-emerald-50 border-emerald-200 hover:border-emerald-400 hover:bg-emerald-100 cursor-pointer'
+    containerClasses = 'bg-emerald-50 border-emerald-300 hover:border-emerald-400 hover:bg-emerald-100 cursor-pointer'
     badgeClasses = 'bg-emerald-200/70 text-emerald-800'
-    badgeText = 'Your booking'
+    badgeText = `Your booking (${count}/${MAX_PLAYERS_PER_SLOT})`
     badgeIcon = <CheckIcon />
-  } else if (busy) {
-    containerClasses = 'bg-slate-50 border-slate-200 cursor-not-allowed opacity-70'
-    badgeClasses = 'bg-slate-200/70 text-slate-600'
-    badgeText = 'Booked'
+  } else if (isFull) {
+    containerClasses = 'bg-slate-50 border-slate-200 cursor-not-allowed opacity-80'
+    badgeClasses = 'bg-slate-200/80 text-slate-600'
+    badgeText = `Full (${count}/${MAX_PLAYERS_PER_SLOT})`
     badgeIcon = <LockIcon />
+  } else if (isPartiallyBooked) {
+    containerClasses = 'bg-white border-amber-200 hover:border-emerald-300 hover:bg-emerald-50/70 cursor-pointer'
+    badgeClasses = 'bg-amber-100 text-amber-800'
+    badgeText = `${count}/${MAX_PLAYERS_PER_SLOT} booked — Open`
+    badgeIcon = null
   } else {
     containerClasses = 'bg-white border-slate-200 hover:border-emerald-300 hover:bg-emerald-50/50 cursor-pointer'
     badgeClasses = 'bg-emerald-100 text-emerald-700'
@@ -83,7 +90,7 @@ function Slot({ time, reservedBy = [], currentPlayer, onClick, disabled, ended, 
   return (
     <button
       onClick={onClick}
-      disabled={disabled || isSaving}
+      disabled={disabled}
       className={`w-full text-left px-4 py-3 rounded-xl border-2 transition-all duration-200 ${containerClasses}`}
     >
       <div className="flex justify-between items-start gap-2">
@@ -99,6 +106,9 @@ function Slot({ time, reservedBy = [], currentPlayer, onClick, disabled, ended, 
               ))}
             </div>
           )}
+          {isPartiallyBooked && (
+            <div className="mt-1 text-[11px] text-amber-700 font-medium">{MAX_PLAYERS_PER_SLOT - count} spots still open</div>
+          )}
         </div>
         <div className={`flex items-center gap-1 text-xs font-medium px-2 py-1 rounded-full shrink-0 ${badgeClasses}`}>
           {badgeIcon}
@@ -107,7 +117,7 @@ function Slot({ time, reservedBy = [], currentPlayer, onClick, disabled, ended, 
       </div>
     </button>
   )
-}
+})
 
 function ReservedSessionsCarousel({ blocks, currentPlayer, dateKey, nowMs }) {
   const scrollerRef = useRef(null)
@@ -179,12 +189,12 @@ function ReservedSessionsCarousel({ blocks, currentPlayer, dateKey, nowMs }) {
 }
 
 // Slot clicks are handed to the parent, which opens the shared group-booking
-// dialog: open slots start a booking with the signed-in player; slots the
-// signed-in player already holds open the cancellation dialog for the whole
-// group booked in that slot. Days outside today/tomorrow and 30-minute slots
-// that have already ended are view-only: they can be inspected but never
-// booked or canceled.
-export default function CourtSchedule({
+// dialog: open slots (including partially occupied) start a booking with the
+// signed-in player; slots the signed-in player already holds open the
+// cancellation dialog for the whole group booked in that slot. Days outside
+// today/tomorrow and 30-minute slots that have already ended are view-only:
+// they can be inspected but never booked or canceled.
+const CourtSchedule = React.memo(function CourtSchedule({
   court,
   date,
   location,
@@ -217,26 +227,39 @@ export default function CourtSchedule({
     practiceLocations,
   }).length
 
-  const totalSlots = (() => {
+  const totalSlots = useMemo(() => {
     const start = 8 * 60
     const end = 18 * 60
     let count = 0
     for (let t = start; t <= end; t += 30) count++
     return count
-  })()
-  const bookedCount = Object.values(reserved).filter((v) => Array.isArray(v) && v.length > 0).length
-  const myCount = Object.values(reserved).reduce((acc, v) => acc + (Array.isArray(v) && v.includes(currentPlayer) ? 1 : 0), 0)
-  const sessionBlocks = courtSessionBlocks(reservations, { dateKey: date, location, court })
+  }, [])
 
-  const slots = []
-  const start = 8 * 60
-  const end = 18 * 60
-  for (let t = start; t <= end; t += 30) {
-    const endTime = t + 30
-    const startLabel = formatTimeLabel(t)
-    const endLabel = formatTimeLabel(endTime)
-    slots.push({ label: `${startLabel}–${endLabel}`, start: t, end: endTime })
-  }
+  // BookedCount counts slots that are fully occupied (4/4) for stats
+  const bookedCount = useMemo(() => {
+    return Object.values(reserved).filter((v) => Array.isArray(v) && v.length >= MAX_PLAYERS_PER_SLOT).length
+  }, [reserved])
+
+  const myCount = useMemo(() => {
+    return Object.values(reserved).reduce((acc, v) => acc + (Array.isArray(v) && v.includes(currentPlayer) ? 1 : 0), 0)
+  }, [reserved, currentPlayer])
+
+  const sessionBlocks = useMemo(() => {
+    return courtSessionBlocks(reservations, { dateKey: date, location, court })
+  }, [reservations, date, location, court])
+
+  const slots = useMemo(() => {
+    const list = []
+    const start = 8 * 60
+    const end = 18 * 60
+    for (let t = start; t <= end; t += 30) {
+      const endTime = t + 30
+      const startLabel = formatTimeLabel(t)
+      const endLabel = formatTimeLabel(endTime)
+      list.push({ label: `${startLabel}–${endLabel}`, start: t, end: endTime })
+    }
+    return list
+  }, [])
 
   return (
     <div className="relative flex h-full min-h-0 w-full flex-col overflow-hidden rounded-2xl bg-white shadow-2xl">
@@ -279,11 +302,11 @@ export default function CourtSchedule({
         <div className="flex flex-wrap gap-3 mt-4">
           <div className="flex items-center gap-1.5 rounded-full bg-white/10 px-3 py-1.5 text-xs font-medium text-white">
             <span className="w-2 h-2 rounded-full bg-emerald-400" />
-            {totalSlots - bookedCount} open
+            {totalSlots - bookedCount} open (up to {MAX_PLAYERS_PER_SLOT}/slot)
           </div>
           <div className="flex items-center gap-1.5 rounded-full bg-white/10 px-3 py-1.5 text-xs font-medium text-white">
             <span className="w-2 h-2 rounded-full bg-red-400" />
-            {bookedCount} booked
+            {bookedCount} fully booked
           </div>
           {myCount > 0 && (
             <div className="flex items-center gap-1.5 rounded-full bg-emerald-400/20 px-3 py-1.5 text-xs font-medium text-emerald-200">
@@ -316,7 +339,7 @@ export default function CourtSchedule({
             sessionsLabel={`${Math.min(sessionsUsed, MAX_SESSIONS_PER_DAY)}/${MAX_SESSIONS_PER_DAY} sessions`}
           />
           <span className="ml-auto rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-500">
-            {barnesOnly30 ? '30-minute times — Barnes allows one 30-minute session per reservation' : '30-minute times'}
+            {barnesOnly30 ? '30-minute times — Barnes allows one 30-minute session per reservation' : `30-minute times — up to ${MAX_PLAYERS_PER_SLOT} players per slot`}
           </span>
         </div>
       </div>
@@ -334,21 +357,26 @@ export default function CourtSchedule({
             const players = reserved[slot.label] || []
             const ended = completedSlots ? completedSlots.has(slot.label) : false
             const isOwnedByCurrentPlayer = players.includes(currentPlayer)
-            const isReservedBySomeoneElse = players.length > 0 && !isOwnedByCurrentPlayer
+            const isFull = players.length >= MAX_PLAYERS_PER_SLOT && !isOwnedByCurrentPlayer ? true : players.length >= MAX_PLAYERS_PER_SLOT
+            const isPartiallyBooked = players.length > 0 && players.length < MAX_PLAYERS_PER_SLOT && !isOwnedByCurrentPlayer
+            const isReservedFullForOthers = players.length >= MAX_PLAYERS_PER_SLOT && !isOwnedByCurrentPlayer
             const slotPrefix = `${key}|${slot.label}|`
             const isSaving = Object.keys(pendingReservations).some(
               (k) => k.startsWith(`book|${slotPrefix}`) || k.startsWith(`cancel|${slotPrefix}`)
             )
+            const disabled = ended || isSaving || isReservedFullForOthers
             return (
               <Slot
                 key={slot.label}
                 time={slot.label}
                 reservedBy={players}
                 currentPlayer={currentPlayer}
-                disabled={isReservedBySomeoneElse || isSaving}
+                disabled={disabled}
                 ended={ended}
                 isOwnedByCurrentPlayer={isOwnedByCurrentPlayer}
                 isSaving={isSaving}
+                isFull={players.length >= MAX_PLAYERS_PER_SLOT}
+                isPartiallyBooked={isPartiallyBooked}
                 onClick={() => {
                   if (ended) {
                     alert('That time has already ended and can no longer be booked or canceled.')
@@ -358,14 +386,15 @@ export default function CourtSchedule({
                     alert('This day is view only — bookings and cancellations are only available for today and tomorrow.')
                     return
                   }
-                  if (isReservedBySomeoneElse) {
-                    alert(`That slot is reserved by ${players.map(formatPlayerName).join(', ')}. You can only manage your own bookings.`)
+                  if (isReservedFullForOthers) {
+                    alert(`That slot is fully booked (${MAX_PLAYERS_PER_SLOT}/${MAX_PLAYERS_PER_SLOT}) by ${players.map(formatPlayerName).join(', ')}.`)
                     return
                   }
                   if (isOwnedByCurrentPlayer) {
                     onOpenBooking({ mode: 'cancel', slots: [slot.label], players: [...new Set(players)], courtId: court, location, date })
                     return
                   }
+                  // Open to book — even if partially occupied by others, there is space
                   onOpenBooking({ mode: 'book', slots: [slot.label], players: [currentPlayer], courtId: court, location, date })
                 }}
               />
@@ -375,4 +404,6 @@ export default function CourtSchedule({
       </div>
     </div>
   )
-}
+})
+
+export default CourtSchedule
