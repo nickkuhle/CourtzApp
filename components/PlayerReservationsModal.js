@@ -31,9 +31,36 @@ function CalendarIcon() {
   )
 }
 
-function ReservationEntry({ entry }) {
+function XIcon() {
   return (
-    <article className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm transition hover:border-slate-300 hover:shadow-md">
+    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+      <line x1="18" y1="6" x2="6" y2="18" />
+      <line x1="6" y1="6" x2="18" y2="18" />
+    </svg>
+  )
+}
+
+// Every player booked in the reservation's slots (not just the selected one),
+// so the card shows the whole group that a cancellation would affect.
+function groupPlayersForEntry(reservations, entry) {
+  const set = new Set()
+  const key = `${entry.location}|${entry.date}|${entry.court}`
+  for (const slot of entry.slots || []) {
+    const value = reservations[key]?.[slot]
+    const names = Array.isArray(value) ? value : (value ? [value] : [])
+    names.forEach((name) => set.add(name))
+  }
+  return [...set]
+}
+
+// One reservation card. Entries that can still be changed (today/tomorrow, not
+// ended) render as a button — clicking anywhere on the card opens the shared
+// cancellation dialog, where individual players can be removed from the
+// request before confirming.
+function ReservationEntry({ entry, group = [], onCancel }) {
+  const cancelable = Boolean(onCancel)
+  const inner = (
+    <>
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
@@ -50,7 +77,9 @@ function ReservationEntry({ entry }) {
         </div>
       </div>
       <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-slate-100 pt-3">
-        <PlayerChip name={entry.player} compact />
+        {group.length > 0
+          ? group.map((name) => <PlayerChip key={name} name={name} compact highlight={name === entry.player} />)
+          : <PlayerChip name={entry.player} compact highlight />}
         {entry.section === 'current' && (
           <span className="rounded-full bg-blue-100 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-blue-700">Today</span>
         )}
@@ -63,11 +92,40 @@ function ReservationEntry({ entry }) {
           <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-amber-700">View only</span>
         )}
       </div>
+      {cancelable && (
+        <div className="mt-3 flex items-center justify-between gap-2 border-t border-slate-100 pt-2.5">
+          <span className="text-[11px] text-slate-400">
+            {group.length > 1 ? `${group.length} players in this reservation` : 'Your reservation'}
+          </span>
+          <span className="inline-flex items-center gap-1 rounded-full bg-rose-100 px-2.5 py-1 text-[11px] font-bold text-rose-700 transition group-hover:bg-rose-600 group-hover:text-white">
+            <XIcon />
+            Cancel
+          </span>
+        </div>
+      )}
+    </>
+  )
+
+  if (cancelable) {
+    return (
+      <button
+        type="button"
+        onClick={() => onCancel(entry)}
+        aria-label={`Cancel the reservation for ${formatPlayerName(entry.player)} on Court ${entry.court} at ${entry.location} ${entry.timeRange}`}
+        className="group h-full w-full rounded-2xl border-2 border-slate-200 bg-white p-4 text-left shadow-sm transition hover:border-rose-300 hover:shadow-md cursor-pointer"
+      >
+        {inner}
+      </button>
+    )
+  }
+  return (
+    <article className="h-full rounded-2xl border border-slate-200 bg-white p-4 shadow-sm transition hover:border-slate-300 hover:shadow-md">
+      {inner}
     </article>
   )
 }
 
-export default function PlayerReservationsModal({ reservations, roster, initialPlayer, onClose }) {
+export default function PlayerReservationsModal({ reservations, roster, initialPlayer, onClose, onCancelReservation }) {
   const [selectedPlayer, setSelectedPlayer] = useState(initialPlayer)
   const sections = useMemo(
     () => playerReservationSections(reservations, selectedPlayer),
@@ -77,7 +135,11 @@ export default function PlayerReservationsModal({ reservations, roster, initialP
 
   useEffect(() => {
     function handleKeyDown(event) {
-      if (event.key === 'Escape' && !event.defaultPrevented) onClose?.()
+      if (event.key === 'Escape' && !event.defaultPrevented) {
+        // Let the cancellation dialog handle Escape when it is open on top.
+        if (document.querySelector('[data-booking-modal]')) return
+        onClose?.()
+      }
     }
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
@@ -95,7 +157,7 @@ export default function PlayerReservationsModal({ reservations, roster, initialP
                 <span className="text-xs font-bold uppercase tracking-[0.15em]">Player schedule</span>
               </div>
               <h2 className="mt-1 text-2xl font-bold text-white">Player&apos;s reservations</h2>
-              <p className="mt-1 text-sm text-blue-200">Past, current and upcoming reservations from the loaded Google Sheet.</p>
+              <p className="mt-1 text-sm text-blue-200">Past, current and upcoming reservations. Swipe sideways through each list — tap a current or upcoming reservation to cancel it.</p>
             </div>
             <button type="button" onClick={onClose} className="rounded-xl bg-white/10 p-2 text-white transition hover:bg-white/20" aria-label="Close reservations">
               <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg>
@@ -141,10 +203,22 @@ export default function PlayerReservationsModal({ reservations, roster, initialP
                   <span className="rounded-full bg-slate-200 px-2.5 py-1 text-xs font-bold text-slate-600">{entries.length}</span>
                 </div>
                 {entries.length ? (
-                  <div className="grid gap-3 sm:grid-cols-2">
-                    {entries.map((entry) => (
-                      <ReservationEntry key={`${entry.location}|${entry.date}|${entry.court}|${entry.start}`} entry={entry} />
-                    ))}
+                  <div className="hide-scrollbar flex snap-x snap-mandatory gap-2 overflow-x-auto overscroll-x-contain pb-1">
+                    {entries.map((entry) => {
+                      const group = groupPlayersForEntry(reservations, entry)
+                      // Only reservations that can still be changed can be
+                      // canceled: today/tomorrow, and not already ended.
+                      const cancelable = !entry.viewOnly && !entry.ended
+                      return (
+                        <div key={`${entry.location}|${entry.date}|${entry.court}|${entry.start}`} className="w-[min(18rem,80%)] shrink-0 snap-center">
+                          <ReservationEntry
+                            entry={entry}
+                            group={group}
+                            onCancel={cancelable ? onCancelReservation : null}
+                          />
+                        </div>
+                      )
+                    })}
                   </div>
                 ) : (
                   <div className="rounded-xl border border-dashed border-slate-200 bg-white/60 px-4 py-3 text-sm text-slate-400">No {meta.title.toLowerCase()} reservations.</div>

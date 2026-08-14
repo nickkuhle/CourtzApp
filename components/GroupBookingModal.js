@@ -83,7 +83,9 @@ export default function GroupBookingModal({
   }
 
   function removePlayer(name) {
-    if (mode === 'cancel') return
+    // Works in BOTH modes: on a booking it drops the player from the booking;
+    // on a cancellation it drops the player from the cancellation request so
+    // that player keeps their reservation while everyone else is removed.
     setPlayers(prev => prev.filter(n => n !== name))
     setError(null)
   }
@@ -141,7 +143,9 @@ export default function GroupBookingModal({
     }
   }
 
-  const label = confirmLabel || (mode === 'cancel' ? 'Cancel group booking' : `Book for ${players.length} player${players.length === 1 ? '' : 's'}`)
+  const label = confirmLabel || (mode === 'cancel'
+    ? `Cancel for ${players.length} player${players.length === 1 ? '' : 's'}`
+    : `Book for ${players.length} player${players.length === 1 ? '' : 's'}`)
 
   return (
     <div data-booking-modal className="fixed inset-0 z-[60] flex items-start md:items-center justify-center overflow-auto">
@@ -256,12 +260,13 @@ export default function GroupBookingModal({
                     {players.map(name => (
                       <span key={name} className="inline-flex items-center gap-1 rounded-full">
                         <PlayerChip name={name} />
-                        {mode !== 'cancel' && !staffStep && (
+                        {!staffStep && (
                           <button
                             type="button"
                             onClick={() => removePlayer(name)}
+                            title={mode === 'cancel' ? `Keep ${formatPlayerName(name)} booked and remove them from this cancellation` : `Remove ${formatPlayerName(name)} from this booking`}
                             className="-ml-3 rounded-full border border-white bg-slate-200 p-1 text-slate-600 shadow-sm hover:bg-rose-100 hover:text-rose-700"
-                            aria-label={`Remove ${formatPlayerName(name)}`}
+                            aria-label={mode === 'cancel' ? `Keep ${formatPlayerName(name)} booked` : `Remove ${formatPlayerName(name)}`}
                           >
                             <XIcon />
                           </button>
