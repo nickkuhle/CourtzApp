@@ -50,14 +50,12 @@ export default function PlayerSwitcher({
 
   useEffect(() => () => clearTimeout(blurTimer.current), [])
 
-  const filtered = useMemo(() => {
+  // One pass over the roster serves both the dropdown (first 30 hits) and the
+  // "n of N players" footer count.
+  const { filtered, totalMatches } = useMemo(() => {
     const q = query.trim().toLowerCase()
-    return roster.filter((name) => !q || searchableName(name).includes(q)).slice(0, 30)
-  }, [query, roster])
-
-  const totalMatches = useMemo(() => {
-    const q = query.trim().toLowerCase()
-    return roster.filter((name) => !q || searchableName(name).includes(q)).length
+    const matches = q ? roster.filter((name) => searchableName(name).includes(q)) : roster
+    return { filtered: matches.slice(0, 30), totalMatches: matches.length }
   }, [query, roster])
 
   function choose(name) {

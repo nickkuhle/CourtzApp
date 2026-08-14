@@ -1,5 +1,8 @@
 import { getRoster } from '../../lib/sheets.js'
 
+// Vercel: same generous-but-bounded window as the schedule read.
+export const maxDuration = 20
+
 export default async function handler(req, res) {
   try {
     const roster = await getRoster()

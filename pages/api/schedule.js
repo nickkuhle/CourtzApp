@@ -1,5 +1,9 @@
 import { getSchedule } from '../../lib/sheets.js'
 
+// Vercel: allow the Apps Script round-trip to finish on serverless (the Hobby
+// plan allows up to 60s). Local `next dev` ignores this.
+export const maxDuration = 20
+
 // One initial request provides both pieces of data the booking screen needs.
 // This avoids making a second round-trip to Google Sheets just for the roster.
 export default async function handler(req, res) {

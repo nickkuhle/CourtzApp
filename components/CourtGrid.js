@@ -5,56 +5,42 @@ import {
   courtSessionBlocks,
   currentReservationPlayers,
   describeFocusedSession,
+  formatPlayerLastName,
   formatPlayerName,
   playerStyle,
 } from '../lib/schedule-display'
 
 // The court SVG is portrait (140x220) inside a landscape frame, so it is
 // letterboxed. Overlay labels are positioned in that same letterboxed court
-// and keep a readable size even when the painted service boxes are small.
+// and keep a readable size even when the painted court is small.
 const COURT_WIDTH_PCT = ((140 / 220) / (11 / 7)) * 100
 
-const SERVICE_BOX_LAYOUT = [
-  { left: `${(25 / 140) * 100}%`, top: `${(56.15 / 220) * 100}%`, width: `${(45 / 140) * 100}%`, height: `${(53.85 / 220) * 100}%` },
-  { left: `${(70 / 140) * 100}%`, top: `${(56.15 / 220) * 100}%`, width: `${(45 / 140) * 100}%`, height: `${(53.85 / 220) * 100}%` },
-  { left: `${(25 / 140) * 100}%`, top: `${(110 / 220) * 100}%`, width: `${(45 / 140) * 100}%`, height: `${(53.85 / 220) * 100}%` },
-  { left: `${(70 / 140) * 100}%`, top: `${(110 / 220) * 100}%`, width: `${(45 / 140) * 100}%`, height: `${(53.85 / 220) * 100}%` },
+// One label per quadrant of the back court (the area BETWEEN the service line
+// and the baseline, on both sides of the net). Order: near deuce, near ad,
+// far deuce, far ad. "Deuce" and "ad" are from each player's own perspective
+// (the near player's deuce side is the right half of the picture).
+const QUADRANT_LAYOUT = [
+  { left: `${(70 / 140) * 100}%`, top: `${(163.85 / 220) * 100}%`, width: `${(60 / 140) * 100}%`, height: `${(46.15 / 220) * 100}%` },
+  { left: `${(10 / 140) * 100}%`, top: `${(163.85 / 220) * 100}%`, width: `${(60 / 140) * 100}%`, height: `${(46.15 / 220) * 100}%` },
+  { left: `${(10 / 140) * 100}%`, top: `${(10 / 220) * 100}%`, width: `${(60 / 140) * 100}%`, height: `${(46.15 / 220) * 100}%` },
+  { left: `${(70 / 140) * 100}%`, top: `${(10 / 220) * 100}%`, width: `${(60 / 140) * 100}%`, height: `${(46.15 / 220) * 100}%` },
 ]
 
-// Converts any roster format ("Last, First" or "First Last") into
-// "Last, F" for the compact on-court overlay.
-function formatCourtLabel(rawName) {
-  const trimmed = String(rawName || '').trim()
-  if (!trimmed) return ''
-  if (trimmed.includes(',')) {
-    const [lastPart, ...firstParts] = trimmed.split(',')
-    const last = lastPart.trim()
-    const first = firstParts.join(',').trim()
-    const initial = first ? first[0].toUpperCase() : ''
-    return initial ? `${last}, ${initial}` : last
-  }
-  const parts = trimmed.split(/\s+/).filter(Boolean)
-  if (parts.length === 1) return parts[0]
-  const first = parts[0]
-  const last = parts[parts.length - 1]
-  const initial = first ? first[0].toUpperCase() : ''
-  return initial ? `${last}, ${initial}` : last
-}
-
-function CourtPlayer({ name }) {
+// Compact on-court label: the player's LAST NAME only, on a translucent pill
+// so it stays readable over the green court.
+function QuadrantLabel({ name }) {
   const style = playerStyle(name)
-  const label = formatCourtLabel(name)
   return (
     <div
-      className="flex max-w-full items-center justify-center rounded-md border border-white/80 bg-white/95 px-1.5 py-1 shadow-md backdrop-blur-sm"
+      className="flex max-w-full items-center justify-center gap-1 rounded-md border border-white/60 bg-slate-950/60 px-1.5 py-0.5 shadow-sm backdrop-blur-sm"
       title={formatPlayerName(name)}
     >
       <span
-        className="h-1.5 w-1.5 shrink-0 rounded-full"
+        className="h-1.5 w-1.5 shrink-0 rounded-full ring-1 ring-white/50"
         style={{ background: style.fill || '#16a34a' }}
       />
-      <span className="ml-1 max-w-[5.5rem] truncate text-[9px] font-extrabold leading-tight tracking-tight text-slate-800">
-        {label}
+      <span className="truncate text-[11px] font-bold leading-tight tracking-tight text-white">
+        {formatPlayerLastName(name)}
       </span>
     </div>
   )
@@ -86,11 +72,11 @@ function CourtGraphic({ highlight, gradientId, players = [] }) {
       {players.length > 0 && (
         <div className="pointer-events-none absolute inset-y-0 left-1/2 -translate-x-1/2" style={{ width: `${COURT_WIDTH_PCT}%` }}>
           {players.map((name, index) => {
-            const box = SERVICE_BOX_LAYOUT[index]
+            const box = QUADRANT_LAYOUT[index]
             if (!box || !name) return null
             return (
               <div key={`${name}-${index}`} className="absolute flex items-center justify-center p-0.5" style={box}>
-                <CourtPlayer name={name} />
+                <QuadrantLabel name={name} />
               </div>
             )
           })}

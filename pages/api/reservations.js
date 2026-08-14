@@ -6,6 +6,51 @@ import { validateBooking } from '../../lib/booking-rules.js'
 // same rules under its write lock before touching the Sheet, so a stale
 // browser can never sneak past them either.
 
+// Vercel: give the Sheet round-trip time to finish on serverless (the Hobby
+// plan allows up to 60s). Local `next dev` ignores this.
+export const maxDuration = 20
+
+// Booking payloads are tiny; cap the accepted JSON size so an oversized body
+// is rejected before it is parsed.
+export const config = {
+  api: {
+    bodyParser: { sizeLimit: '64kb' },
+  },
+}
+
+// --- Write rate limiting ----------------------------------------------------
+// A gentle in-memory limiter per client IP so a runaway script (or a curious
+// player mashing the button) can't spam the Google Sheet. On serverless hosts
+// each instance keeps its own bucket, so this is a backstop rather than a
+// hard guarantee; Vercel's own DDoS/firewall protection sits in front of it.
+const WRITE_RATE_WINDOW_MS = 60_000
+const WRITE_RATE_MAX = 30
+const writeRateBuckets = new Map()
+
+function clientIp(req) {
+  const headers = req?.headers || {}
+  const forwarded = headers['x-forwarded-for']
+  const first = typeof forwarded === 'string' ? forwarded.split(',')[0].trim() : ''
+  if (first) return first
+  return req?.socket?.remoteAddress || 'unknown'
+}
+
+function writeRateLimited(ip, now = Date.now()) {
+  let bucket = writeRateBuckets.get(ip)
+  if (!bucket || now - bucket.startedAt > WRITE_RATE_WINDOW_MS) {
+    bucket = { startedAt: now, count: 0 }
+    writeRateBuckets.set(ip, bucket)
+  }
+  bucket.count += 1
+  // Keep the map from growing without bound on a long-lived server.
+  if (writeRateBuckets.size > 500) {
+    for (const [key, entry] of writeRateBuckets) {
+      if (now - entry.startedAt > WRITE_RATE_WINDOW_MS) writeRateBuckets.delete(key)
+    }
+  }
+  return bucket.count > WRITE_RATE_MAX
+}
+
 let warnedAboutUnprotectedStaffApproval = false
 
 function configuredStaffApprovalCode() {
@@ -79,6 +124,10 @@ export default async function handler(req, res) {
   }
 
   if (req.method === 'POST') {
+    if (writeRateLimited(clientIp(req))) {
+      res.setHeader('Retry-After', '60')
+      return res.status(429).json({ error: 'Too many booking requests. Please wait a minute and try again.' })
+    }
     const body = req.body || {}
     const { action, location, date, courtId, slot, slots, name, names, staffApproved, staffCode, practiceLocations } = body
     if (!location || !date || !courtId) {

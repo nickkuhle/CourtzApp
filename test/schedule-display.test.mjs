@@ -6,6 +6,7 @@ import {
   currentReservationPlayers,
   describeFocusedSession,
   formatPlayerFirstName,
+  formatPlayerLastName,
   formatPlayerName,
   playerColorIndex,
   playerInitials,
@@ -47,6 +48,16 @@ test('player display helpers reformat canonical names without changing their val
   assert.equal(playerColorIndex(PLAYER), playerColorIndex(PLAYER), 'the same canonical player keeps the same color')
   assert.ok(playerColorIndex(PLAYER) >= 0)
   assert.ok(playerColorIndex(PLAYER) < 8)
+})
+
+test('formatPlayerLastName keeps only the surname for the on-court quadrant labels', () => {
+  assert.equal(formatPlayerLastName('Abbey, Stephanie'), 'Abbey')
+  assert.equal(formatPlayerLastName('Williams, Venus Ebony'), 'Williams')
+  assert.equal(formatPlayerLastName('  Chen, Alice  '), 'Chen')
+  assert.equal(formatPlayerLastName('De La Cruz, Maria'), 'De La Cruz')
+  assert.equal(formatPlayerLastName('Alice Johnson'), 'Johnson')
+  assert.equal(formatPlayerLastName('Madonna'), 'Madonna')
+  assert.equal(formatPlayerLastName(''), '')
 })
 
 test('court display blocks group two non-Barnes halves and merge players sharing a session', () => {
