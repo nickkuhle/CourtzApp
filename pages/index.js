@@ -726,6 +726,41 @@ export default function Home() {
     })
   }, [selectedCourt, selectedLocation, selectedDay, viewOnlyDate, currentPlayer, reservations, activeLocations])
 
+  // Called by the Player's reservations dialog when a current or upcoming
+  // reservation is tapped. The whole group booked in that window is
+  // pre-selected in the cancellation dialog so individual players can be
+  // removed from the request before confirming. Slots that have already ended
+  // are never sent.
+  const handleCancelPlayerReservation = useCallback((entry) => {
+    const { location, date, court } = entry
+    if (!isBookableDay(date)) {
+      alert('This reservation is on a view-only day and can no longer be changed.')
+      return
+    }
+    const cancellableSlots = (entry.slots || []).filter((slot) => !isSlotCompleted(date, slot))
+    if (!cancellableSlots.length) {
+      alert('This reservation has already ended and can no longer be canceled.')
+      return
+    }
+    const reservationKey = `${location}|${date}|${court}`
+    const group = [...new Set(cancellableSlots.flatMap((slot) => reservations[reservationKey]?.[slot] || []))]
+    if (!group.length) {
+      alert('This reservation could not be found in the current schedule. Refresh the page and try again.')
+      return
+    }
+    setBookingModal({
+      origin: 'player-reservations',
+      mode: 'cancel',
+      location,
+      date,
+      courtId: court,
+      slots: cancellableSlots,
+      players: group,
+      title: `Cancel Court ${court}`,
+      subtitle: `${location} · ${formatDateLong(dateKeyToLocalDate(date))}`,
+    })
+  }, [reservations])
+
   // Add another location from the + button (only sites the Sheet already has a
   // court-grid tab for are offered). The choice is remembered in the browser.
   const hiddenLocations = useMemo(() => locations.filter((l) => !activeLocations.includes(l)), [locations, activeLocations])
@@ -943,7 +978,7 @@ export default function Home() {
                   !showSiteOverview ? 'bg-[#1f5f99] text-white shadow' : 'text-slate-600 hover:text-slate-900'
                 }`}
               >
-                Court cards
+                Courts
               </button>
               <button
                 type="button"
@@ -1285,6 +1320,7 @@ export default function Home() {
           roster={roster}
           initialPlayer={currentPlayer}
           onClose={() => setShowPlayerReservations(false)}
+          onCancelReservation={handleCancelPlayerReservation}
         />
       )}
 

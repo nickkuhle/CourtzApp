@@ -24,6 +24,15 @@ function cellTitle({ court, time, status, players }) {
   return `${base} — This time has already ended.`
 }
 
+// Where to open the hover tooltip so it never runs off the edge of the grid:
+// cells near the left edge open rightward, near the right edge leftward, and
+// the rest stay centered above the cell.
+function tooltipAlign(index, total) {
+  if (index <= 2) return 'left-0'
+  if (total > 0 && index >= total - 3) return 'right-0'
+  return 'left-1/2 -translate-x-1/2'
+}
+
 function summaryCell({ label, available, total, ended }) {
   if (ended) {
     return {
@@ -108,20 +117,39 @@ const SiteOverview = React.memo(function SiteOverview({
               >
                 Court {court.number}
               </button>
-              {cells.map((cell) => {
+              {cells.map((cell, cellIndex) => {
                 const meta = STATUS_META[cell.status]
+                const title = cellTitle({ court, time: cell.label, status: cell.status, players: cell.players })
+                const hasPlayers = cell.status === 'partial' || cell.status === 'full'
                 return (
                   <button
                     key={cell.label}
                     type="button"
                     onClick={() => onSelectCourt?.(court.id)}
                     disabled={cell.status === 'ended'}
-                    title={cellTitle({ court, time: cell.label, status: cell.status, players: cell.players })}
-                    aria-label={cellTitle({ court, time: cell.label, status: cell.status, players: cell.players })}
-                    className={`h-7 rounded-[3px] transition focus:outline-none focus:ring-2 focus:ring-blue-500/60 ${
+                    title={hasPlayers ? undefined : title}
+                    aria-label={title}
+                    className={`group relative h-7 rounded-[3px] transition focus:outline-none focus:ring-2 focus:ring-blue-500/60 ${
                       cell.status === 'ended' ? `${meta.cell} cursor-default` : `${meta.cell} cursor-pointer hover:ring-2 hover:ring-blue-500/60`
                     }`}
-                  />
+                  >
+                    {hasPlayers && (
+                      <span
+                        role="tooltip"
+                        className={`pointer-events-none absolute bottom-full z-30 mb-1.5 hidden w-max max-w-[18rem] flex-col gap-0.5 whitespace-normal rounded-lg border border-slate-200 bg-slate-900/95 px-2.5 py-1.5 text-left shadow-xl backdrop-blur-sm group-hover:flex ${tooltipAlign(cellIndex, cells.length)}`}
+                      >
+                        <span className="text-[10px] font-bold uppercase tracking-wide text-slate-300">
+                          Court {court.number} · {cell.label}
+                        </span>
+                        <span className="text-xs font-semibold text-white">
+                          {cell.status === 'full'
+                            ? `Full — ${cell.players.length}/${MAX_PLAYERS_PER_SLOT}:`
+                            : `${cell.players.length}/${MAX_PLAYERS_PER_SLOT} booked — space left:`}
+                        </span>
+                        <span className="text-xs leading-snug text-slate-200">{cell.players.map(formatPlayerName).join(', ')}</span>
+                      </span>
+                    )}
+                  </button>
                 )
               })}
             </React.Fragment>

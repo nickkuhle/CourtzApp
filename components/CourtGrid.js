@@ -11,29 +11,38 @@ import {
 } from '../lib/schedule-display'
 
 // The court SVG is portrait (140x220) inside a landscape frame, so it is
-// letterboxed. Overlay labels are positioned in that same letterboxed court
-// and keep a readable size even when the painted court is small.
+// letterboxed: the painted court occupies a centered vertical band of this
+// width, leaving a margin on each side of the card.
 const COURT_WIDTH_PCT = ((140 / 220) / (11 / 7)) * 100
+// Room on each side of the letterboxed court (as % of the card width).
+const COURT_SIDE_MARGIN_PCT = (100 - COURT_WIDTH_PCT) / 2
+// Small gap between the painted court edge and the labels parked outside it.
+const LABEL_GAP_PCT = 0.75
 
-// One label per quadrant of the back court (the area BETWEEN the service line
-// and the baseline, on both sides of the net). Order: near deuce, near ad,
-// far deuce, far ad. "Deuce" and "ad" are from each player's own perspective
-// (the near player's deuce side is the right half of the picture).
-const QUADRANT_LAYOUT = [
-  { left: `${(70 / 140) * 100}%`, top: `${(163.85 / 220) * 100}%`, width: `${(60 / 140) * 100}%`, height: `${(46.15 / 220) * 100}%` },
-  { left: `${(10 / 140) * 100}%`, top: `${(163.85 / 220) * 100}%`, width: `${(60 / 140) * 100}%`, height: `${(46.15 / 220) * 100}%` },
-  { left: `${(10 / 140) * 100}%`, top: `${(10 / 220) * 100}%`, width: `${(60 / 140) * 100}%`, height: `${(46.15 / 220) * 100}%` },
-  { left: `${(70 / 140) * 100}%`, top: `${(10 / 220) * 100}%`, width: `${(60 / 140) * 100}%`, height: `${(46.15 / 220) * 100}%` },
+// One label per quadrant of the court, anchored just OUTSIDE the painted
+// court (left or right) so surnames never cover the court lines. Each label's
+// vertical center lines up with the center of its quadrant. Order matches the
+// court drawing: near deuce (bottom right), near ad (bottom left), far deuce
+// (top left), far ad (top right). "Deuce" and "ad" are from each player's own
+// perspective (the near player's deuce side is the right half of the picture).
+const OUTSIDE_QUADRANT_LAYOUT = [
+  { side: 'right', top: `${((163.85 + 46.15 / 2) / 220) * 100}%` },
+  { side: 'left', top: `${((163.85 + 46.15 / 2) / 220) * 100}%` },
+  { side: 'left', top: `${((10 + 46.15 / 2) / 220) * 100}%` },
+  { side: 'right', top: `${((10 + 46.15 / 2) / 220) * 100}%` },
 ]
 
-// Compact on-court label: the player's LAST NAME only, on a translucent pill
-// so it stays readable over the green court.
-function QuadrantLabel({ name }) {
+// Compact label parked just outside the court: the player's LAST NAME only on
+// a translucent pill, so it stays readable without covering the green court.
+// Hovering the pill reveals the full name in a tooltip (anchored so it opens
+// over the court, where there is room, never off the edge of the card).
+function QuadrantLabel({ name, anchor = 'left', tooltipBelow = false }) {
   const style = playerStyle(name)
+  const fullName = formatPlayerName(name)
   return (
     <div
-      className="flex max-w-full items-center justify-center gap-1 rounded-md border border-white/60 bg-slate-950/60 px-1.5 py-0.5 shadow-sm backdrop-blur-sm"
-      title={formatPlayerName(name)}
+      className="group/player pointer-events-auto relative flex max-w-full items-center justify-center gap-1 rounded-md border border-white/60 bg-slate-950/60 px-1.5 py-0.5 shadow-sm backdrop-blur-sm"
+      title={fullName}
     >
       <span
         className="h-1.5 w-1.5 shrink-0 rounded-full ring-1 ring-white/50"
@@ -41,6 +50,14 @@ function QuadrantLabel({ name }) {
       />
       <span className="truncate text-[11px] font-bold leading-tight tracking-tight text-white">
         {formatPlayerLastName(name)}
+      </span>
+      <span
+        role="tooltip"
+        className={`pointer-events-none absolute z-20 max-w-[16rem] truncate whitespace-nowrap rounded-lg border border-white/10 bg-slate-950/95 px-2.5 py-1 text-[11px] font-semibold text-white opacity-0 shadow-xl backdrop-blur-sm transition-opacity duration-150 group-hover/player:opacity-100 ${
+          anchor === 'right' ? 'right-0' : 'left-0'
+        } ${tooltipBelow ? 'top-full mt-1.5' : 'bottom-full mb-1.5'}`}
+      >
+        {fullName}
       </span>
     </div>
   )
@@ -70,13 +87,23 @@ function CourtGraphic({ highlight, gradientId, players = [] }) {
       </svg>
 
       {players.length > 0 && (
-        <div className="pointer-events-none absolute inset-y-0 left-1/2 -translate-x-1/2" style={{ width: `${COURT_WIDTH_PCT}%` }}>
+        <div className="pointer-events-none absolute inset-0">
           {players.map((name, index) => {
-            const box = QUADRANT_LAYOUT[index]
-            if (!box || !name) return null
+            const pos = OUTSIDE_QUADRANT_LAYOUT[index]
+            if (!pos || !name) return null
+            const anchor = pos.side === 'left' ? 'left' : 'right'
             return (
-              <div key={`${name}-${index}`} className="absolute flex items-center justify-center p-0.5" style={box}>
-                <QuadrantLabel name={name} />
+              <div
+                key={`${name}-${index}`}
+                className="absolute flex items-center justify-center"
+                style={{
+                  [anchor]: `${LABEL_GAP_PCT}%`,
+                  top: pos.top,
+                  width: `${COURT_SIDE_MARGIN_PCT - LABEL_GAP_PCT}%`,
+                  transform: 'translateY(-50%)',
+                }}
+              >
+                <QuadrantLabel name={name} anchor={anchor} tooltipBelow={index >= 2} />
               </div>
             )
           })}
