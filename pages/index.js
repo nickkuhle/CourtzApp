@@ -7,6 +7,7 @@ import PlayerSwitcher from '../components/PlayerSwitcher'
 import PlayerReservationsModal from '../components/PlayerReservationsModal'
 import DayCarousel from '../components/DayCarousel'
 import DaySlide from '../components/DaySlide'
+import SiteOverview from '../components/SiteOverview'
 import {
   laNow,
   laDayOffset,
@@ -70,7 +71,14 @@ function getPlayerFromUrl() {
   const params = new URLSearchParams(window.location.search)
   const player = params.get('player')
   const passcode = params.get('passcode')
-  if (player) return decodeURIComponent(player)
+  if (player) {
+    try {
+      return decodeURIComponent(player)
+    } catch {
+      // A malformed ?player=... value must never crash the page.
+      return 'Alice Johnson'
+    }
+  }
   if (passcode) return PLAYER_PASSCODES[passcode.toLowerCase()] || 'Alice Johnson'
   return 'Alice Johnson'
 }
@@ -201,6 +209,7 @@ export default function Home() {
   const [selectedCourt, setSelectedCourt] = useState(null)
   const [currentPlayer, setCurrentPlayer] = useState('Alice Johnson')
   const [showAddLocation, setShowAddLocation] = useState(false)
+  const [showSiteOverview, setShowSiteOverview] = useState(false)
 
   const [reservations, setReservations] = useState({})
   const [roster, setRoster] = useState(FALLBACK_ROSTER)
@@ -917,8 +926,39 @@ export default function Home() {
           )}
         </div>
 
-        {/* Court Grid */}
+        {/* Court Grid / Site Overview */}
         <section className="mb-6">
+          <div className="mb-4 flex justify-center">
+            <div
+              className="inline-flex rounded-full border border-slate-200 bg-white/90 p-1 shadow-sm"
+              role="tablist"
+              aria-label="Court display view"
+            >
+              <button
+                type="button"
+                role="tab"
+                aria-selected={!showSiteOverview}
+                onClick={() => setShowSiteOverview(false)}
+                className={`rounded-full px-4 py-1.5 text-sm font-medium transition ${
+                  !showSiteOverview ? 'bg-[#1f5f99] text-white shadow' : 'text-slate-600 hover:text-slate-900'
+                }`}
+              >
+                Court cards
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={showSiteOverview}
+                onClick={() => setShowSiteOverview(true)}
+                title="See every court and every time at a glance — which hours the whole site is busy or open"
+                className={`rounded-full px-4 py-1.5 text-sm font-medium transition ${
+                  showSiteOverview ? 'bg-[#1f5f99] text-white shadow' : 'text-slate-600 hover:text-slate-900'
+                }`}
+              >
+                Site overview
+              </button>
+            </div>
+          </div>
           <DaySlide
             dayKey={selectedDay}
             canSwipeLeft={Boolean(selectedDay) && days.findIndex((d) => d.key === selectedDay) < days.length - 1}
@@ -944,7 +984,19 @@ export default function Home() {
               </div>
             ) : (
               <div className="flex justify-center">
-                <CourtGrid courts={courts} reservations={reservations} onSelect={handleSelectCourt} selectedCourt={selectedCourt} completedSlots={completedSlots} />
+                {showSiteOverview ? (
+                  <SiteOverview
+                    courts={courts}
+                    reservations={reservations}
+                    location={selectedLocation}
+                    dateKey={selectedDay}
+                    slotLabels={THIRTY_MIN_SLOTS}
+                    completedSlots={completedSlots}
+                    onSelectCourt={handleSelectCourt}
+                  />
+                ) : (
+                  <CourtGrid courts={courts} reservations={reservations} onSelect={handleSelectCourt} selectedCourt={selectedCourt} completedSlots={completedSlots} />
+                )}
               </div>
             )}
           </DaySlide>

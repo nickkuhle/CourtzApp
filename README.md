@@ -2,6 +2,14 @@
 
 Courtz is the practice-court scheduler for the USTA Girls' National Championships.
 
+## What's new in this update
+
+- **Cleaner on-court display** — player names no longer crowd the service boxes. Each quadrant between the service line and baseline shows a single **last name** (deuce and ad sides, both sides of the net); hover for the full name.
+- **Site overview** — a new "Site overview" toggle above the courts shows a color-coded map of every court × every 30-minute slot for the selected day and site. Green = open, amber = space left, red = full, gray = ended. The bottom row counts courts with space left, so a red **0** means the whole site is booked at that time. Tap any square to open that court's schedule.
+- **Faster loading** — Tailwind CSS is now compiled at build time (no more runtime CDN), so the first paint is much faster and the app no longer depends on a third-party script.
+- **Hardening** — Content-Security-Policy and other security headers, write rate-limiting, and tighter request validation.
+- **Vercel-ready** — see [DEPLOYMENT.md](./DEPLOYMENT.md) for a non-technical, step-by-step deployment guide.
+
 ## Google Sheet connection
 
 The app is connected to the **test copy** of the tournament Google Sheet through the Apps Script URL supplied for testing.
