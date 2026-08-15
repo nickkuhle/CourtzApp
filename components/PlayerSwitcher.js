@@ -26,6 +26,7 @@ function searchableName(name) {
 // Shared identity picker used wherever the desk changes the player for whom it
 // is acting. The selected value passed to onSelect is always the untouched,
 // canonical roster name; only the text shown to people is reformatted.
+// Now supports blank initial state — field is blank until typing and selecting.
 export default function PlayerSwitcher({
   currentPlayer,
   roster = [],
@@ -39,19 +40,19 @@ export default function PlayerSwitcher({
   onOpenReservations = null,
 }) {
   const styles = APPEARANCE[appearance] || APPEARANCE.navbar
-  const [query, setQuery] = useState(() => formatPlayerName(currentPlayer))
+  const [query, setQuery] = useState(() => formatPlayerName(currentPlayer || ''))
   const [open, setOpen] = useState(false)
   const blurTimer = useRef(null)
   const listId = useId()
 
   useEffect(() => {
-    if (!open) setQuery(formatPlayerName(currentPlayer))
+    if (!open) setQuery(formatPlayerName(currentPlayer || ''))
   }, [currentPlayer, open])
 
   useEffect(() => () => clearTimeout(blurTimer.current), [])
 
   // One pass over the roster serves both the dropdown (first 30 hits) and the
-  // "n of N players" footer count.
+  // \"n of N players\" footer count.
   const { filtered, totalMatches } = useMemo(() => {
     const q = query.trim().toLowerCase()
     const matches = q ? roster.filter((name) => searchableName(name).includes(q)) : roster
@@ -59,15 +60,27 @@ export default function PlayerSwitcher({
   }, [query, roster])
 
   function choose(name) {
+    if (name === '') {
+      onSelect?.('')
+      setQuery('')
+      setOpen(false)
+      return
+    }
     if (!name) return
     onSelect?.(name)
     setQuery(formatPlayerName(name))
     setOpen(false)
   }
 
+  function clearSelection() {
+    onSelect?.('')
+    setQuery('')
+    setOpen(false)
+  }
+
   function openAndSelect(event) {
     clearTimeout(blurTimer.current)
-    setQuery(formatPlayerName(currentPlayer))
+    setQuery(formatPlayerName(currentPlayer || ''))
     setOpen(true)
     event.currentTarget.select()
   }
@@ -75,7 +88,7 @@ export default function PlayerSwitcher({
   return (
     <div className={`relative inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1.5 ${styles.root} ${className}`}>
       <span className={`whitespace-nowrap text-[11px] font-semibold ${styles.label}`}>{label}</span>
-      <div className="relative min-w-0">
+      <div className="relative min-w-0 flex items-center gap-1">
         <input
           type="text"
           role="combobox"
@@ -83,18 +96,29 @@ export default function PlayerSwitcher({
           aria-expanded={open}
           aria-controls={listId}
           aria-autocomplete="list"
-          value={open ? query : formatPlayerName(currentPlayer)}
+          value={open ? query : formatPlayerName(currentPlayer || '')}
           onChange={(event) => {
-            setQuery(event.target.value)
+            const val = event.target.value
+            setQuery(val)
             setOpen(true)
+            if (val.trim() === '') {
+              // Clearing the input clears the selection, making field blank
+              onSelect?.('')
+            }
           }}
           onFocus={openAndSelect}
           onClick={(event) => event.currentTarget.select()}
           onBlur={() => {
-            blurTimer.current = setTimeout(() => setOpen(false), 150)
+            blurTimer.current = setTimeout(() => {
+              // If left blank, keep it blank; otherwise restore formatted name
+              if (query.trim() === '' && !currentPlayer) {
+                setQuery('')
+              }
+              setOpen(false)
+            }, 150)
           }}
           onKeyDown={(event) => {
-            if (event.key === 'Enter' && filtered.length) {
+            if (event.key === 'Enter' && query.trim() !== '' && filtered.length) {
               event.preventDefault()
               choose(filtered[0])
             }
@@ -103,10 +127,30 @@ export default function PlayerSwitcher({
               event.stopPropagation()
               setOpen(false)
             }
+            if (event.key === 'Backspace' && query === '' && currentPlayer) {
+              // Allow quick clear of selected player
+              event.preventDefault()
+              clearSelection()
+            }
           }}
           placeholder="Search player…"
           className={`w-28 rounded-full border px-2.5 py-1 text-xs focus:outline-none sm:w-36 ${styles.input} ${inputClassName}`}
         />
+        {currentPlayer ? (
+          <button
+            type="button"
+            onClick={clearSelection}
+            title="Clear selected player"
+            aria-label="Clear selected player"
+            className={`inline-flex h-5 w-5 items-center justify-center rounded-full border text-[10px] font-bold leading-none transition ${
+              appearance === 'light'
+                ? 'border-slate-200 bg-white text-slate-500 hover:bg-slate-100'
+                : 'border-white/30 bg-white/15 text-white hover:bg-white/25'
+            }`}
+          >
+            ×
+          </button>
+        ) : null}
         {open && (
           <div
             id={listId}

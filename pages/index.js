@@ -67,7 +67,7 @@ const PLAYER_PASSCODES = {
 }
 
 function getPlayerFromUrl() {
-  if (typeof window === 'undefined') return 'Alice Johnson'
+  if (typeof window === 'undefined') return ''
   const params = new URLSearchParams(window.location.search)
   const player = params.get('player')
   const passcode = params.get('passcode')
@@ -76,11 +76,11 @@ function getPlayerFromUrl() {
       return decodeURIComponent(player)
     } catch {
       // A malformed ?player=... value must never crash the page.
-      return 'Alice Johnson'
+      return ''
     }
   }
-  if (passcode) return PLAYER_PASSCODES[passcode.toLowerCase()] || 'Alice Johnson'
-  return 'Alice Johnson'
+  if (passcode) return PLAYER_PASSCODES[passcode.toLowerCase()] || ''
+  return ''
 }
 
 function formatDate(d) {
@@ -207,7 +207,7 @@ export default function Home() {
   const [courtsByDate, setCourtsByDate] = useState({})
   const [selectedLocation, setSelectedLocation] = useState('')
   const [selectedCourt, setSelectedCourt] = useState(null)
-  const [currentPlayer, setCurrentPlayer] = useState('Alice Johnson')
+  const [currentPlayer, setCurrentPlayer] = useState('')
   const [showAddLocation, setShowAddLocation] = useState(false)
   const [showSiteOverview, setShowSiteOverview] = useState(false)
 
@@ -222,7 +222,7 @@ export default function Home() {
   const [findDuration, setFindDuration] = useState(30)
   const [findTime, setFindTime] = useState('')
   const [findNotice, setFindNotice] = useState(null)
-  const [bookingModal, setBookingModal] = useState(null) // {mode, courtId, slots, players, title, subtitle}
+  const [bookingModal, setBookingModal] = useState(null) // {mode, courtId, slots, players, bookedPlayers, title, subtitle}
   const [sheetsConnected, setSheetsConnected] = useState(null) // null = still loading/unknown
   const [staffCodeRequired, setStaffCodeRequired] = useState(false)
   const lastScheduleSync = useRef(0)
@@ -294,8 +294,8 @@ export default function Home() {
   }, [refreshSchedule])
 
   useEffect(() => {
-    if (rosterLoaded && roster.length > 0 && !roster.includes(currentPlayer)) {
-      setCurrentPlayer(roster[0])
+    if (rosterLoaded && currentPlayer && roster.length > 0 && !roster.includes(currentPlayer)) {
+      setCurrentPlayer('')
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [rosterLoaded])
@@ -622,18 +622,21 @@ export default function Home() {
   // Find a Court result: open the group-booking dialog for the chosen court
   // (or the cancellation dialog when the current player already has a booking
   // in the window). Now allows shared occupancy up to 4 players.
+  // Supports blank currentPlayer and prevents duplicate booking by excluding
+  // already-booked players from additional players search.
   const handleFindCourtPick = useCallback((courtId) => {
     if (!findDay || !isBookableDay(findDay)) {
       alert('Bookings are only available for today and tomorrow.')
       return
     }
     const slotPlayersList = findSlots.map((slot) => reservations[`${findLocation}|${findDay}|${courtId}`]?.[slot] || [])
-    const allPlayers = slotPlayersList.flat()
-    const mine = allPlayers.includes(currentPlayer)
-    const full = slotPlayersList.some((players) => players.length >= MAX_PLAYERS_PER_SLOT && !players.includes(currentPlayer))
+    const allPlayers = [...new Set(slotPlayersList.flat())]
+    const mine = currentPlayer ? allPlayers.includes(currentPlayer) : false
+    const full = currentPlayer
+      ? slotPlayersList.some((players) => players.length >= MAX_PLAYERS_PER_SLOT && !players.includes(currentPlayer))
+      : slotPlayersList.some((players) => players.length >= MAX_PLAYERS_PER_SLOT)
 
     if (mine) {
-      const group = [...new Set(allPlayers)]
       setBookingModal({
         origin: 'find',
         mode: 'cancel',
@@ -641,7 +644,8 @@ export default function Home() {
         date: findDay,
         courtId,
         slots: findSlots,
-        players: group,
+        players: allPlayers,
+        bookedPlayers: [],
         title: `Cancel Court ${courtId}`,
         subtitle: `${findLocation} · ${formatDateLong(dateKeyToLocalDate(findDay))}`,
       })
@@ -651,20 +655,25 @@ export default function Home() {
       alert(`Court ${courtId} is fully booked (${MAX_PLAYERS_PER_SLOT}/${MAX_PLAYERS_PER_SLOT}) for that time. Pick another court.`)
       return
     }
-    const validation = validateBooking({
-      action: 'book',
-      location: findLocation,
-      date: findDay,
-      courtId,
-      slots: findSlots,
-      names: [currentPlayer],
-      staffApproved: false,
-      reservations,
-      practiceLocations: activeLocations,
-    })
-    if (!validation.ok) {
-      alert(validation.error)
-      return
+    // When currentPlayer is blank, allow opening booking modal with empty list;
+    // validation for empty will be done inside modal after player selection.
+    const namesForValidation = currentPlayer ? [currentPlayer] : []
+    if (namesForValidation.length) {
+      const validation = validateBooking({
+        action: 'book',
+        location: findLocation,
+        date: findDay,
+        courtId,
+        slots: findSlots,
+        names: namesForValidation,
+        staffApproved: false,
+        reservations,
+        practiceLocations: activeLocations,
+      })
+      if (!validation.ok) {
+        alert(validation.error)
+        return
+      }
     }
     setBookingModal({
       origin: 'find',
@@ -673,7 +682,8 @@ export default function Home() {
       date: findDay,
       courtId,
       slots: findSlots,
-      players: [currentPlayer],
+      players: namesForValidation,
+      bookedPlayers: allPlayers,
       title: `Book Court ${courtId}`,
       subtitle: `${findLocation} · ${formatDateLong(dateKeyToLocalDate(findDay))}`,
     })
@@ -689,6 +699,9 @@ export default function Home() {
   }, [])
 
   // Called by the CourtSchedule modal when a slot is tapped.
+  // Supports blank currentPlayer: user can click court and time slot, then add
+  // any players in booking modal. Also prevents duplicate booking by passing
+  // bookedPlayers to modal so already-booked players are excluded from search.
   const handleOpenBooking = useCallback(({ mode, slots, players, courtId, location, date }) => {
     const bookingCourt = courtId ?? selectedCourt
     const bookingLocation = location || selectedLocation
@@ -698,30 +711,75 @@ export default function Home() {
       return
     }
     const dateObj = dateKeyToLocalDate(bookingDate)
-    const validation = validateBooking({
-      action: mode,
-      location: bookingLocation,
-      date: bookingDate,
-      courtId: bookingCourt,
-      slots,
-      names: mode === 'cancel' ? players : [currentPlayer],
-      staffApproved: false,
-      reservations,
-      practiceLocations: activeLocations,
-    })
-    if (!validation.ok) {
-      alert(validation.error)
+    // booked players already in those slots
+    const reservationKey = `${bookingLocation}|${bookingDate}|${bookingCourt}`
+    const bookedPlayers = [...new Set((slots || []).flatMap((slot) => reservations[reservationKey]?.[slot] || []))]
+
+    if (mode === 'cancel') {
+      const validation = validateBooking({
+        action: mode,
+        location: bookingLocation,
+        date: bookingDate,
+        courtId: bookingCourt,
+        slots,
+        names: players,
+        staffApproved: false,
+        reservations,
+        practiceLocations: activeLocations,
+      })
+      if (!validation.ok) {
+        alert(validation.error)
+        return
+      }
+      setBookingModal({
+        origin: 'schedule',
+        mode,
+        location: bookingLocation,
+        date: bookingDate,
+        courtId: bookingCourt,
+        slots,
+        players,
+        bookedPlayers: [],
+        title: `Cancel Court ${bookingCourt}`,
+        subtitle: `${bookingLocation} · ${formatDateLong(dateObj)}`,
+      })
       return
     }
+
+    // Book mode: currentPlayer may be blank; allow empty to open modal so user
+    // can add players via \"booking courts as\" or \"additional players\".
+    const initialPlayers = currentPlayer ? [currentPlayer] : []
+    const namesForValidation = initialPlayers.length ? initialPlayers : []
+    if (namesForValidation.length) {
+      const validation = validateBooking({
+        action: 'book',
+        location: bookingLocation,
+        date: bookingDate,
+        courtId: bookingCourt,
+        slots,
+        names: namesForValidation,
+        staffApproved: false,
+        reservations,
+        practiceLocations: activeLocations,
+      })
+      if (!validation.ok) {
+        alert(validation.error)
+        return
+      }
+    }
+    // Use the passed players if provided and currentPlayer blank? The contract
+    // from CourtSchedule for book mode passes [currentPlayer]; if blank we use [].
+    const modalPlayers = players && players.length && currentPlayer ? players : initialPlayers
     setBookingModal({
       origin: 'schedule',
-      mode,
+      mode: 'book',
       location: bookingLocation,
       date: bookingDate,
       courtId: bookingCourt,
       slots,
-      players,
-      title: mode === 'cancel' ? `Cancel Court ${bookingCourt}` : `Book Court ${bookingCourt}`,
+      players: modalPlayers,
+      bookedPlayers,
+      title: `Book Court ${bookingCourt}`,
       subtitle: `${bookingLocation} · ${formatDateLong(dateObj)}`,
     })
   }, [selectedCourt, selectedLocation, selectedDay, viewOnlyDate, currentPlayer, reservations, activeLocations])
@@ -1122,7 +1180,7 @@ export default function Home() {
                   }}
                   appearance="header"
                   dropdownAlign="left"
-                  sessionsLabel={`${Math.min(existingPlayerSessions(reservations, { dateKey: findDay, name: currentPlayer, practiceLocations: activeLocations }).length, MAX_SESSIONS_PER_DAY)}/${MAX_SESSIONS_PER_DAY} sessions`}
+                  sessionsLabel={`${Math.min(currentPlayer ? existingPlayerSessions(reservations, { dateKey: findDay, name: currentPlayer, practiceLocations: activeLocations }).length : 0, MAX_SESSIONS_PER_DAY)}/${MAX_SESSIONS_PER_DAY} sessions`}
                   onOpenReservations={() => setShowPlayerReservations(true)}
                 />
               </div>
@@ -1351,6 +1409,7 @@ export default function Home() {
           subtitle={bookingModal.subtitle}
           slots={bookingModal.slots}
           initialPlayers={bookingModal.players}
+          bookedPlayers={bookingModal.bookedPlayers || []}
           roster={roster}
           mode={bookingModal.mode}
           evaluate={evaluateBookingRules}
