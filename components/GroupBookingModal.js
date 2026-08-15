@@ -34,11 +34,15 @@ function ShieldAlertIcon() {
 // Court. Now includes proper staff-code prompt: when a booking is within 1 hour
 // of the SAME player's own session, it requires staff approval; if a staff code
 // is configured, the prompt asks for that code to bypass.
+// Updated: prevents duplicate booking by excluding already-booked players from
+// additional players search (fixes glitch where Player A already booked could be
+// added again via additional players).
 export default function GroupBookingModal({
   title = 'Book a court',
   subtitle = '',
   slots = [],
   initialPlayers = [],
+  bookedPlayers = [], // players already booked in these slots — exclude from search
   roster = [],
   mode = 'book', // 'book' | 'cancel'
   confirmLabel,
@@ -61,14 +65,22 @@ export default function GroupBookingModal({
     setStaffCodeRequired(Boolean(requiresStaffCode))
   }, [requiresStaffCode])
 
+  // If initialPlayers change (e.g., booking as field cleared), sync
+  useEffect(() => {
+    setPlayers([...new Set(initialPlayers.map(n => String(n).trim()).filter(Boolean))])
+  }, [initialPlayers])
+
+  const bookedSet = useMemo(() => new Set((bookedPlayers || []).map(n => String(n).trim()).filter(Boolean)), [bookedPlayers])
+
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase()
     const selected = new Set(players)
     return roster
       .filter(n => !selected.has(n))
+      .filter(n => !bookedSet.has(n)) // fix duplicate booking glitch
       .filter(n => !q || `${n} ${formatPlayerName(n)}`.toLowerCase().includes(q))
       .slice(0, 30)
-  }, [roster, players, search])
+  }, [roster, players, bookedSet, search])
 
   const evaluation = useMemo(() => {
     if (mode !== 'book' || !evaluate) return { ok: true, warning: null, error: null }
@@ -76,6 +88,10 @@ export default function GroupBookingModal({
   }, [mode, evaluate, players])
 
   function addPlayer(name) {
+    if (bookedSet.has(name)) {
+      setError(`${formatPlayerName(name)} already has this time slot booked and cannot be added again.`)
+      return
+    }
     setPlayers(prev => (prev.includes(name) ? prev : [...prev, name]))
     setSearch('')
     setShowDropdown(false)
@@ -83,9 +99,6 @@ export default function GroupBookingModal({
   }
 
   function removePlayer(name) {
-    // Works in BOTH modes: on a booking it drops the player from the booking;
-    // on a cancellation it drops the player from the cancellation request so
-    // that player keeps their reservation while everyone else is removed.
     setPlayers(prev => prev.filter(n => n !== name))
     setError(null)
   }
@@ -94,6 +107,12 @@ export default function GroupBookingModal({
     if (mode === 'book') {
       if (players.length === 0) {
         setError('Add at least one player before confirming.')
+        return
+      }
+      // Double-check duplicate prevention before confirming
+      const duplicate = players.find(p => bookedSet.has(p))
+      if (duplicate) {
+        setError(`${formatPlayerName(duplicate)} already has this time slot booked. Remove them from the list.`)
         return
       }
       if (!evaluation.ok) {
@@ -120,11 +139,8 @@ export default function GroupBookingModal({
       const code = e?.code
       const needsCode = e?.staffCodeRequired || code === 'STAFF_APPROVAL_CODE_REQUIRED' || code === 'STAFF_APPROVAL_CODE_INVALID' || code === 'STAFF_APPROVAL_REQUIRED'
       if (needsCode) {
-        // Ensure we stay on staff approval step and prompt for code if required by server
         if (e?.staffCodeRequired) setStaffCodeRequired(true)
-        // If server said STAFF_APPROVAL_REQUIRED but we weren't in staff step, move to it
         if (code === 'STAFF_APPROVAL_REQUIRED') {
-          // Keep existing staffCodeRequired value (may be true if env configured)
           setStaffStep(true)
         }
         if (code === 'STAFF_APPROVAL_CODE_REQUIRED' || code === 'STAFF_APPROVAL_CODE_INVALID') {
@@ -132,7 +148,6 @@ export default function GroupBookingModal({
           setStaffStep(true)
         }
       }
-      // If error is about staff approval, ensure we are in staff step to show code prompt
       if (code === 'STAFF_APPROVAL_REQUIRED' || code === 'STAFF_APPROVAL_CODE_REQUIRED' || code === 'STAFF_APPROVAL_CODE_INVALID' || e?.staffCodeRequired) {
         setStaffStep(true)
         if (e?.staffCodeRequired) setStaffCodeRequired(true)
@@ -164,6 +179,11 @@ export default function GroupBookingModal({
                   </span>
                 ))}
               </div>
+              {mode === 'book' && bookedSet.size > 0 && (
+                <div className="mt-2 text-xs text-blue-200">
+                  Already booked in this slot: {[...bookedSet].map(formatPlayerName).join(', ')} — they are hidden from search to prevent duplicates.
+                </div>
+              )}
             </div>
             <button onClick={busy ? undefined : onClose} className="rounded-lg bg-white/10 hover:bg-white/20 p-2 text-white" aria-label="Close">
               <XIcon />
@@ -192,7 +212,6 @@ export default function GroupBookingModal({
               <span className="font-semibold text-slate-800">{players.map(formatPlayerName).join(', ')}</span>.
             </div>
 
-            {/* Staff code prompt — always visible when approval needed, required indicator when server says code needed */}
             <div className="rounded-xl border border-amber-200 bg-white px-4 py-3">
               <label htmlFor="staff-approval-code" className="block text-xs font-semibold uppercase tracking-wider text-slate-600 mb-2">
                 Staff approval code {staffCodeRequired ? <span className="text-rose-600 normal-case">(required)</span> : <span className="text-slate-400 normal-case">(optional unless configured)</span>}
@@ -207,7 +226,6 @@ export default function GroupBookingModal({
                 onKeyDown={(event) => {
                   if (event.key === 'Enter' && !saving && !busy) {
                     event.preventDefault()
-                    // Allow confirm with empty code only if not required
                     if (!staffCodeRequired || staffCode.trim()) runConfirm(true)
                   }
                 }}
@@ -254,7 +272,7 @@ export default function GroupBookingModal({
                   {mode === 'cancel' ? 'Players being removed' : 'Players on this booking'}
                 </div>
                 {players.length === 0 ? (
-                  <p className="text-sm text-slate-400">No players selected yet.</p>
+                  <p className="text-sm text-slate-400">No players selected yet. Search below to add players.</p>
                 ) : (
                   <div className="flex flex-wrap gap-2">
                     {players.map(name => (
@@ -280,7 +298,7 @@ export default function GroupBookingModal({
               {/* Roster search (book mode only) */}
               {mode === 'book' && (
                 <div>
-                  <div className="text-xs font-semibold uppercase tracking-wider text-slate-500 mb-2">Add another player</div>
+                  <div className="text-xs font-semibold uppercase tracking-wider text-slate-500 mb-2">Add another player — booking courts as or additional players</div>
                   <div className="relative">
                     <div className="relative">
                       <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400">
@@ -303,7 +321,9 @@ export default function GroupBookingModal({
                     {showDropdown && (
                       <div className="absolute top-full mt-1.5 w-full max-h-56 overflow-auto rounded-xl border border-slate-200 bg-white shadow-xl z-10">
                         {filtered.length === 0 ? (
-                          <div className="px-4 py-3 text-sm text-slate-400">No players found</div>
+                          <div className="px-4 py-3 text-sm text-slate-400">
+                            {bookedSet.size ? 'No available players — already-booked players hidden' : 'No players found'}
+                          </div>
                         ) : (
                           filtered.map(name => (
                             <button
@@ -320,7 +340,7 @@ export default function GroupBookingModal({
                     )}
                   </div>
                   <p className="mt-1.5 text-xs text-slate-400">
-                    {players.length} of {roster.length} players selected — each slot holds up to 4 players.
+                    {players.length} of {roster.length} players selected — each slot holds up to 4 players. Already-booked players are excluded to prevent duplicate bookings.
                   </p>
                 </div>
               )}
