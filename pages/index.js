@@ -746,18 +746,20 @@ export default function Home() {
       return
     }
 
-    // Book mode: currentPlayer may be blank; allow empty to open modal so user
-    // can add players via \"booking courts as\" or \"additional players\".
-    const initialPlayers = currentPlayer ? [currentPlayer] : []
-    const namesForValidation = initialPlayers.length ? initialPlayers : []
-    if (namesForValidation.length) {
+    // CourtSchedule sends the player that was selected on the card at the exact
+    // moment the slot was tapped. Prefer that event value over this callback's
+    // surrounding state so a just-completed switch from Player A to Player X
+    // can never open a modal prefilled with A. Blank selection still opens the
+    // modal and lets the desk choose a player there.
+    const initialPlayers = [...new Set((players || []).map((name) => String(name).trim()).filter(Boolean))]
+    if (initialPlayers.length) {
       const validation = validateBooking({
         action: 'book',
         location: bookingLocation,
         date: bookingDate,
         courtId: bookingCourt,
         slots,
-        names: namesForValidation,
+        names: initialPlayers,
         staffApproved: false,
         reservations,
         practiceLocations: activeLocations,
@@ -767,9 +769,6 @@ export default function Home() {
         return
       }
     }
-    // Use the passed players if provided and currentPlayer blank? The contract
-    // from CourtSchedule for book mode passes [currentPlayer]; if blank we use [].
-    const modalPlayers = players && players.length && currentPlayer ? players : initialPlayers
     setBookingModal({
       origin: 'schedule',
       mode: 'book',
@@ -777,12 +776,12 @@ export default function Home() {
       date: bookingDate,
       courtId: bookingCourt,
       slots,
-      players: modalPlayers,
+      players: initialPlayers,
       bookedPlayers,
       title: `Book Court ${bookingCourt}`,
       subtitle: `${bookingLocation} · ${formatDateLong(dateObj)}`,
     })
-  }, [selectedCourt, selectedLocation, selectedDay, viewOnlyDate, currentPlayer, reservations, activeLocations])
+  }, [selectedCourt, selectedLocation, selectedDay, viewOnlyDate, reservations, activeLocations])
 
   // Called by the Player's reservations dialog when a current or upcoming
   // reservation is tapped. The whole group booked in that window is

@@ -1,11 +1,17 @@
 import React, { useEffect, useMemo, useRef } from 'react'
-import { existingPlayerSessions, slotEndMinutes, MAX_SESSIONS_PER_DAY, isSlotCompleted, isBookableDay, laNow } from '../lib/booking-rules'
+import {
+  existingPlayerSessions,
+  slotEndMinutes,
+  MAX_SESSIONS_PER_DAY,
+  MAX_PLAYERS_PER_SLOT,
+  getSlotBookingState,
+  isSlotCompleted,
+  laNow,
+} from '../lib/booking-rules'
 import PlayerChip from './PlayerChip'
 import PlayerSwitcher from './PlayerSwitcher'
 import useTickingNow from './useTickingNow'
 import { formatPlayerName } from '../lib/schedule-display'
-
-const MAX_PLAYERS_PER_SLOT = 4
 
 function formatTimeLabel(totalMinutes) {
   const hours = Math.floor(totalMinutes / 60)
@@ -128,42 +134,79 @@ const Slot = React.memo(function Slot({ time, reservedBy = [], currentPlayer, on
     badgeIcon = null
   }
 
+  const actionLabel = ended
+    ? `${time} has ended`
+    : isSaving
+      ? `${time} is saving`
+      : isOwnedByCurrentPlayer
+        ? `Manage your booking for ${time}`
+        : isFull
+          ? `${time} is fully booked`
+          : reservedBy.length
+            ? currentPlayer
+              ? `Add ${formatPlayerName(currentPlayer)} to one of ${MAX_PLAYERS_PER_SLOT - count} open spots at ${time}`
+              : `Book one of ${MAX_PLAYERS_PER_SLOT - count} open spots for ${time}`
+            : currentPlayer
+              ? `Book ${time} for ${formatPlayerName(currentPlayer)}`
+              : `Book ${time}`
+
   return (
-    <div className={`w-full text-left px-4 py-3 rounded-xl border-2 transition-all duration-200 ${containerClasses} ${!disabled ? 'cursor-pointer' : ''}`}>
-      <button onClick={onClick} disabled={disabled} className="w-full text-left" type="button">
-        <div className="flex justify-between items-start gap-2">
+    <div className={`relative w-full rounded-xl border-2 px-4 py-3 text-left transition-all duration-200 ${containerClasses} ${!disabled ? 'cursor-pointer' : ''}`}>
+      {/* Keep the primary action stretched across the ENTIRE card. The visible
+          content is layered above it but lets pointer events pass through; the
+          per-player cancel controls opt back in below. This preserves the x
+          buttons without shrinking partially occupied slots to a header-only
+          click target. */}
+      <button
+        type="button"
+        onClick={onClick}
+        disabled={disabled}
+        aria-label={actionLabel}
+        title={actionLabel}
+        className="absolute inset-0 z-0 h-full w-full rounded-[inherit] text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 focus-visible:ring-offset-2 disabled:cursor-not-allowed"
+      >
+        <span className="sr-only">{actionLabel}</span>
+      </button>
+
+      <div className="pointer-events-none relative z-10">
+        <div className="flex items-start justify-between gap-2">
           <div className="flex items-center gap-1.5 text-sm font-semibold text-slate-800">
             <ClockIcon />
             <span>{time}</span>
           </div>
-          <div className={`flex items-center gap-1 text-xs font-medium px-2 py-1 rounded-full shrink-0 ${badgeClasses}`}>
+          <div className={`flex shrink-0 items-center gap-1 rounded-full px-2 py-1 text-xs font-medium ${badgeClasses}`}>
             {badgeIcon}
             <span>{badgeText}</span>
           </div>
         </div>
-      </button>
-      {busy && reservedBy.length > 0 && (
-        <div className="mt-2 flex flex-wrap gap-1.5">
-          {reservedBy.map((name) => (
-            <span key={name} className="inline-flex items-center gap-0.5">
-              <PlayerChip name={name} compact highlight={name === currentPlayer} />
-              <button
-                type="button"
-                onClick={(e) => {
-                  e.stopPropagation()
-                  onCancelPlayer?.(name, time)
-                }}
-                title={`Cancel ${formatPlayerName(name)} from ${time}`}
-                aria-label={`Cancel ${formatPlayerName(name)} from ${time}`}
-                className="-ml-1 inline-flex h-5 w-5 items-center justify-center rounded-full border border-white bg-slate-200 text-slate-600 shadow-sm hover:bg-rose-100 hover:text-rose-700"
-              >
-                <XIconSmall />
-              </button>
-            </span>
-          ))}
-        </div>
-      )}
-      {isPartiallyBooked && <div className="mt-1 text-[11px] text-amber-700 font-medium">{MAX_PLAYERS_PER_SLOT - count} spots still open</div>}
+        {busy && reservedBy.length > 0 && (
+          <div className="mt-2 flex flex-wrap gap-1.5">
+            {reservedBy.map((name) => (
+              <span key={name} className="inline-flex items-center gap-0.5">
+                <PlayerChip name={name} compact highlight={name === currentPlayer} />
+                <button
+                  type="button"
+                  data-no-swipe
+                  onClick={(event) => {
+                    event.stopPropagation()
+                    onCancelPlayer?.(name, time)
+                  }}
+                  title={`Cancel ${formatPlayerName(name)} from ${time}`}
+                  aria-label={`Cancel ${formatPlayerName(name)} from ${time}`}
+                  className="pointer-events-auto -ml-1 inline-flex h-5 w-5 items-center justify-center rounded-full border border-white bg-slate-200 text-slate-600 shadow-sm hover:bg-rose-100 hover:text-rose-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-500"
+                >
+                  <XIconSmall />
+                </button>
+              </span>
+            ))}
+          </div>
+        )}
+        {isPartiallyBooked && (
+          <div className="mt-1 text-[11px] font-medium text-amber-700">
+            {MAX_PLAYERS_PER_SLOT - count} spots still open — tap anywhere to {currentPlayer ? `add ${formatPlayerName(currentPlayer)}` : 'choose a player'}
+          </div>
+        )}
+      </div>
     </div>
   )
 })
@@ -451,10 +494,16 @@ const CourtSchedule = React.memo(function CourtSchedule({
           {slots.map((slot) => {
             const players = reserved[slot.label] || []
             const ended = completedSlots ? completedSlots.has(slot.label) : false
-            const isOwnedByCurrentPlayer = currentPlayer ? players.includes(currentPlayer) : false
-            const isFull = players.length >= MAX_PLAYERS_PER_SLOT
-            const isPartiallyBooked = players.length > 0 && players.length < MAX_PLAYERS_PER_SLOT && !isOwnedByCurrentPlayer
-            const isReservedFullForOthers = currentPlayer ? players.length >= MAX_PLAYERS_PER_SLOT && !isOwnedByCurrentPlayer : players.length >= MAX_PLAYERS_PER_SLOT
+            // Re-evaluate ownership from the CURRENT "Booking Courts As"
+            // player on every render. A slot held by Player A is still a book
+            // action after the user switches this court card to Player X.
+            const {
+              action,
+              isOwnedByCurrentPlayer,
+              isFull,
+              isPartiallyBooked,
+              isReservedFullForOthers,
+            } = getSlotBookingState(players, currentPlayer)
             const slotPrefix = `${key}|${slot.label}|`
             const isSaving = Object.keys(pendingReservations).some((k) => k.startsWith(`book|${slotPrefix}`) || k.startsWith(`cancel|${slotPrefix}`))
             const disabled = ended || isSaving || isReservedFullForOthers
@@ -483,7 +532,7 @@ const CourtSchedule = React.memo(function CourtSchedule({
                     alert(`That slot is fully booked (${MAX_PLAYERS_PER_SLOT}/${MAX_PLAYERS_PER_SLOT}) by ${players.map(formatPlayerName).join(', ')}.`)
                     return
                   }
-                  if (isOwnedByCurrentPlayer) {
+                  if (action === 'cancel') {
                     onOpenBooking({ mode: 'cancel', slots: [slot.label], players: [...new Set(players)], courtId: court, location, date })
                     return
                   }

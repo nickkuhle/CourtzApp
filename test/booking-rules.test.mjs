@@ -10,6 +10,7 @@ import {
   existingPlayerSessions,
   proposedSession,
   validateBooking,
+  getSlotBookingState,
   MAX_SESSIONS_PER_DAY,
 } from '../lib/booking-rules.js'
 import { DEFAULT_PRACTICE_LOCATIONS } from '../lib/locations.js'
@@ -135,6 +136,29 @@ test('completed time slots cannot be booked or canceled; the current slot stays 
   assert.equal(isSlotCompleted(TODAY, slot(480), NOW), false)
   const early = book({ date: TODAY, slots: [slot(480)] })
   assert.equal(early.ok, true)
+})
+
+test('switching players makes another player\'s partially occupied slot bookable', () => {
+  const reservedBy = ['Player A']
+
+  const playerA = getSlotBookingState(reservedBy, 'Player A')
+  assert.equal(playerA.action, 'cancel')
+  assert.equal(playerA.isOwnedByCurrentPlayer, true)
+  assert.equal(playerA.isReservedFullForOthers, false)
+
+  // Regression: after changing "Booking Courts As" inside the court card,
+  // this state used to behave like Player A still owned the slot. Player X
+  // must instead get a normal book action while any of the four spots remain.
+  const playerX = getSlotBookingState(reservedBy, 'Player X')
+  assert.equal(playerX.action, 'book')
+  assert.equal(playerX.isOwnedByCurrentPlayer, false)
+  assert.equal(playerX.isPartiallyBooked, true)
+  assert.equal(playerX.isReservedFullForOthers, false)
+
+  const fullForX = getSlotBookingState(['A', 'B', 'C', 'D'], 'Player X')
+  assert.equal(fullForX.action, 'book')
+  assert.equal(fullForX.isFull, true)
+  assert.equal(fullForX.isReservedFullForOthers, true)
 })
 
 // --- Session grouping -------------------------------------------------------

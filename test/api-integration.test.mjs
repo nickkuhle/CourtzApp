@@ -172,6 +172,38 @@ test('view-only days are rejected by the API for both book and cancel', async ()
   assert.equal(past.body.code, 'BOOKING_RULES')
 })
 
+test('Player X can join the same partially occupied slot after Player A books it', async () => {
+  const location = 'Barnes Tennis Center'
+  const courtId = 4
+  const sharedSlot = slot(690)
+  const playerA = 'Zhou, Zhongyi'
+  const playerX = 'Andreoli, Mia'
+
+  const first = await post('book', {
+    location,
+    date: TOMORROW,
+    courtId,
+    slots: [sharedSlot],
+    names: [playerA],
+  })
+  assert.equal(first.statusCode, 200, JSON.stringify(first.body))
+
+  // This is the exact reported flow at the write boundary: switch the acting
+  // player, then book the already-partially-occupied court/time.
+  const second = await post('book', {
+    location,
+    date: TOMORROW,
+    courtId,
+    slots: [sharedSlot],
+    names: [playerX],
+  })
+  assert.equal(second.statusCode, 200, JSON.stringify(second.body))
+
+  const schedule = await getSchedule(true)
+  const key = `${location}|${TOMORROW}|${courtId}`
+  assert.deepEqual(schedule.reservations[key]?.[sharedSlot], [playerA, playerX])
+})
+
 test('Barnes adjacent 30-minute bookings need staff approval; the hard 2-session limit cannot be bypassed', async () => {
   const player = 'Abbey, Stephanie'
   const first = await post('book', {
