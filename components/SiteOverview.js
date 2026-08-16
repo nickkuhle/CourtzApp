@@ -5,8 +5,9 @@ import { formatPlayerName } from '../lib/schedule-display'
 
 // "Site overview": every court at the selected location as a row, every
 // 30-minute slot as a column. One glance shows which hours of the day the
-// whole site is busy (red) or open (green). Tapping a square opens that
-// court's schedule so the desk can jump straight into booking.
+// whole site is busy (red) or open (green). Tapping a square jumps straight
+// into the booking (or cancellation) dialog for that exact court and time;
+// tapping a court's name still opens its full schedule card.
 
 const STATUS_META = {
   open: { cell: 'bg-emerald-400', dot: 'bg-emerald-400', label: 'Open — nobody booked' },
@@ -17,10 +18,10 @@ const STATUS_META = {
 
 function cellTitle({ court, time, status, players }) {
   const base = `Court ${court.number} · ${time}`
-  if (status === 'open') return `${base} — Open, no one booked. Tap to open this court.`
+  if (status === 'open') return `${base} — Open, no one booked. Tap to book this time on this court.`
   const names = players.map(formatPlayerName).join(', ')
-  if (status === 'partial') return `${base} — ${players.length}/${MAX_PLAYERS_PER_SLOT} booked (${names}). Space left. Tap to open this court.`
-  if (status === 'full') return `${base} — Full (${players.length}/${MAX_PLAYERS_PER_SLOT}): ${names}.`
+  if (status === 'partial') return `${base} — ${players.length}/${MAX_PLAYERS_PER_SLOT} booked (${names}). Space left. Tap to book this time.`
+  if (status === 'full') return `${base} — Full (${players.length}/${MAX_PLAYERS_PER_SLOT}): ${names}. Tap to manage.`
   return `${base} — This time has already ended.`
 }
 
@@ -59,6 +60,7 @@ const SiteOverview = React.memo(function SiteOverview({
   slotLabels,
   completedSlots,
   onSelectCourt,
+  onSelectSlot,
 }) {
   const { rows, summary } = useMemo(
     () => buildSiteOverview({ courts, reservations, location, dateKey, slotLabels, completedSlots }),
@@ -125,11 +127,11 @@ const SiteOverview = React.memo(function SiteOverview({
                   <button
                     key={cell.label}
                     type="button"
-                    onClick={() => onSelectCourt?.(court.id)}
+                    onClick={() => onSelectSlot?.({ court, slot: cell.label, players: cell.players, status: cell.status })}
                     disabled={cell.status === 'ended'}
                     title={hasPlayers ? undefined : title}
                     aria-label={title}
-                    className={`group relative h-7 rounded-[3px] transition focus:outline-none focus:ring-2 focus:ring-blue-500/60 ${
+                    className={`group relative h-8 rounded-[3px] transition focus:outline-none focus:ring-2 focus:ring-blue-500/60 ${
                       cell.status === 'ended' ? `${meta.cell} cursor-default` : `${meta.cell} cursor-pointer hover:ring-2 hover:ring-blue-500/60`
                     }`}
                   >
@@ -147,6 +149,9 @@ const SiteOverview = React.memo(function SiteOverview({
                             : `${cell.players.length}/${MAX_PLAYERS_PER_SLOT} booked — space left:`}
                         </span>
                         <span className="text-xs leading-snug text-slate-200">{cell.players.map(formatPlayerName).join(', ')}</span>
+                        {cell.status === 'partial' && (
+                          <span className="text-[10px] font-semibold text-emerald-300">Tap to add a player</span>
+                        )}
                       </span>
                     )}
                   </button>
@@ -168,7 +173,7 @@ const SiteOverview = React.memo(function SiteOverview({
               <div
                 key={cell.label}
                 title={s.title}
-                className={`flex h-7 items-center justify-center rounded-[3px] text-[9px] font-bold ${s.className}`}
+                className={`flex h-8 items-center justify-center rounded-[3px] text-[9px] font-bold ${s.className}`}
               >
                 {s.text}
               </div>
@@ -178,7 +183,7 @@ const SiteOverview = React.memo(function SiteOverview({
       </div>
 
       <p className="mt-2 px-1 text-[11px] text-slate-400">
-        Tap any square to open that court&apos;s schedule. The bottom row counts courts with space left at each time — a red <span className="font-semibold text-rose-600">0</span> means every court at this site is booked.
+        Tap any square to book that court and time directly, or tap a court&apos;s name to open its full schedule. The bottom row counts courts with space left at each time — a red <span className="font-semibold text-rose-600">0</span> means every court at this site is booked.
       </p>
     </div>
   )
