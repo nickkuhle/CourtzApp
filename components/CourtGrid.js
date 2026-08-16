@@ -2,7 +2,7 @@ import React, { useMemo } from 'react'
 import PlayerChip from './PlayerChip'
 import useTickingNow from './useTickingNow'
 import {
-  courtSessionBlocks,
+  courtSessionBlocksByCourt,
   currentReservationPlayers,
   describeFocusedSession,
   formatPlayerLastName,
@@ -161,14 +161,14 @@ function SessionPreview({ blocks, completedSlots, dateKey, nowMs }) {
 const CourtGrid = React.memo(function CourtGrid({ courts, reservations, onSelect, selectedCourt, completedSlots = null }) {
   const nowMs = useTickingNow()
   const blocksByCourt = useMemo(() => {
+    // Every card in this grid shares the selected location + day, so compute
+    // all courts' blocks in one pass instead of re-scanning every reservation
+    // once per court (a 12-court grid used to pay the cost 12×).
+    if (!courts.length) return new Map()
+    const { location, date } = courts[0]
+    const byCourt = courtSessionBlocksByCourt(reservations, { dateKey: date, location })
     const grouped = new Map()
-    courts.forEach((court) => {
-      grouped.set(String(court.id), courtSessionBlocks(reservations, {
-        dateKey: court.date,
-        location: court.location,
-        court: court.id,
-      }))
-    })
+    for (const court of courts) grouped.set(String(court.id), byCourt.get(String(court.id)) || [])
     return grouped
   }, [courts, reservations])
 

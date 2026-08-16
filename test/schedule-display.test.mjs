@@ -3,6 +3,7 @@ import test from 'node:test'
 
 import {
   courtSessionBlocks,
+  courtSessionBlocksByCourt,
   currentReservationPlayers,
   describeFocusedSession,
   formatPlayerFirstName,
@@ -94,6 +95,25 @@ test('court display blocks keep every Barnes 30-minute slot separate', () => {
   assert.equal(blocks.length, 2)
   assert.deepEqual(blocks.map((block) => block.slots.length), [1, 1])
   assert.deepEqual(blocks.map((block) => block.timeRange), ['8:00 AM–8:30 AM', '8:30 AM–9:00 AM'])
+})
+
+test('courtSessionBlocksByCourt groups every court in one pass and matches per-court results', () => {
+  const reservations = {}
+  add(reservations, PEN, '2026-08-12', 3, 480, [PLAYER, SECOND_PLAYER])
+  add(reservations, PEN, '2026-08-12', 3, 510, [PLAYER])
+  add(reservations, PEN, '2026-08-12', 4, 540, [SECOND_PLAYER])
+  // Another location on the same day must be ignored.
+  add(reservations, BARNES, '2026-08-12', 9, 480, [PLAYER])
+
+  const byCourt = courtSessionBlocksByCourt(reservations, { dateKey: '2026-08-12', location: PEN })
+
+  assert.equal(byCourt.size, 2, 'only the two Peninsula courts are grouped')
+  assert.deepEqual(byCourt.get('3'), courtSessionBlocks(reservations, { dateKey: '2026-08-12', location: PEN, court: 3 }))
+  assert.deepEqual(byCourt.get('4'), courtSessionBlocks(reservations, { dateKey: '2026-08-12', location: PEN, court: 4 }))
+  // Court 3: PLAYER's 480+510 halves merge into one 60-min session while
+  // SECOND_PLAYER's lone 480 slot stays a separate 30-min block.
+  assert.equal(byCourt.get('3').length, 2)
+  assert.deepEqual(byCourt.get('4')[0].players, [SECOND_PLAYER])
 })
 
 test('focused session prefers the reservation on court now, then the next one', () => {

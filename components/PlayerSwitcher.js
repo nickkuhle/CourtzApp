@@ -27,7 +27,9 @@ function searchableName(name) {
 // is acting. The selected value passed to onSelect is always the untouched,
 // canonical roster name; only the text shown to people is reformatted.
 // Now supports blank initial state — field is blank until typing and selecting.
-export default function PlayerSwitcher({
+// Memoized so an unrelated parent re-render (e.g. typing in Find-a-Court) does
+// not rebuild the roster dropdown here.
+const PlayerSwitcher = React.memo(function PlayerSwitcher({
   currentPlayer,
   roster = [],
   onSelect,
@@ -214,4 +216,6 @@ export default function PlayerSwitcher({
       ) : null}
     </div>
   )
-}
+})
+
+export default PlayerSwitcher
