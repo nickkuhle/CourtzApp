@@ -50,9 +50,11 @@ const DAY_KEYS = (() => {
   return [addDaysToDateKey(today, -2), addDaysToDateKey(today, -1), today, addDaysToDateKey(today, 1), addDaysToDateKey(today, 2)]
 })()
 
-// 8:00 AM .. 11:30 AM (enough for the session-limit scenarios)
+// Match the app's full court-card schedule (8:00 AM through the 6:00 PM
+// starting slot). Keeping the late slots in the mock lets integration tests
+// cover end-of-day bookings such as the reported 5:30–6:00 PM case.
 const SLOT_STARTS = []
-for (let t = 8 * 60; t <= 11 * 60 + 30; t += 30) SLOT_STARTS.push(t)
+for (let t = 8 * 60; t <= 18 * 60; t += 30) SLOT_STARTS.push(t)
 
 function timeLabel(totalMinutes) {
   const hours = Math.floor(totalMinutes / 60)

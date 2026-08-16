@@ -138,27 +138,29 @@ test('completed time slots cannot be booked or canceled; the current slot stays 
   assert.equal(early.ok, true)
 })
 
-test('switching players makes another player\'s partially occupied slot bookable', () => {
-  const reservedBy = ['Player A']
+test('switching from Reena to Jordyn makes Reena\'s partially occupied slot bookable', () => {
+  const reena = 'Alavalapati, Reena'
+  const jordyn = 'Hazelitt, Jordyn'
+  const reservedBy = [reena]
 
-  const playerA = getSlotBookingState(reservedBy, 'Player A')
-  assert.equal(playerA.action, 'cancel')
-  assert.equal(playerA.isOwnedByCurrentPlayer, true)
-  assert.equal(playerA.isReservedFullForOthers, false)
+  const reenaState = getSlotBookingState(reservedBy, reena)
+  assert.equal(reenaState.action, 'cancel')
+  assert.equal(reenaState.isOwnedByCurrentPlayer, true)
+  assert.equal(reenaState.isReservedFullForOthers, false)
 
   // Regression: after changing "Booking Courts As" inside the court card,
-  // this state used to behave like Player A still owned the slot. Player X
-  // must instead get a normal book action while any of the four spots remain.
-  const playerX = getSlotBookingState(reservedBy, 'Player X')
-  assert.equal(playerX.action, 'book')
-  assert.equal(playerX.isOwnedByCurrentPlayer, false)
-  assert.equal(playerX.isPartiallyBooked, true)
-  assert.equal(playerX.isReservedFullForOthers, false)
+  // Reena's occupied slot must immediately become a normal book action for
+  // Jordyn while any of the four spots remain.
+  const jordynState = getSlotBookingState(reservedBy, jordyn)
+  assert.equal(jordynState.action, 'book')
+  assert.equal(jordynState.isOwnedByCurrentPlayer, false)
+  assert.equal(jordynState.isPartiallyBooked, true)
+  assert.equal(jordynState.isReservedFullForOthers, false)
 
-  const fullForX = getSlotBookingState(['A', 'B', 'C', 'D'], 'Player X')
-  assert.equal(fullForX.action, 'book')
-  assert.equal(fullForX.isFull, true)
-  assert.equal(fullForX.isReservedFullForOthers, true)
+  const fullForJordyn = getSlotBookingState(['A', 'B', 'C', 'D'], jordyn)
+  assert.equal(fullForJordyn.action, 'book')
+  assert.equal(fullForJordyn.isFull, true)
+  assert.equal(fullForJordyn.isReservedFullForOthers, true)
 })
 
 // --- Session grouping -------------------------------------------------------
