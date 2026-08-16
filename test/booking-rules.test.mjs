@@ -11,6 +11,7 @@ import {
   proposedSession,
   validateBooking,
   getSlotBookingState,
+  getSlotTapIntent,
   MAX_SESSIONS_PER_DAY,
 } from '../lib/booking-rules.js'
 import { DEFAULT_PRACTICE_LOCATIONS } from '../lib/locations.js'
@@ -156,6 +157,18 @@ test('switching from Reena to Jordyn makes Reena\'s partially occupied slot book
   assert.equal(jordynState.isOwnedByCurrentPlayer, false)
   assert.equal(jordynState.isPartiallyBooked, true)
   assert.equal(jordynState.isReservedFullForOthers, false)
+
+  // The page resolves a tap once more from its synchronously updated player
+  // ref. Even if the child card's click closure still captured Reena/cancel,
+  // the authoritative intent is to book only Jordyn.
+  assert.deepEqual(getSlotTapIntent(reservedBy, jordyn), {
+    mode: 'book',
+    players: [jordyn],
+  })
+  assert.deepEqual(getSlotTapIntent(reservedBy, reena), {
+    mode: 'cancel',
+    players: [reena],
+  })
 
   const fullForJordyn = getSlotBookingState(['A', 'B', 'C', 'D'], jordyn)
   assert.equal(fullForJordyn.action, 'book')
