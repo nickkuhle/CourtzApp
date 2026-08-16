@@ -17,6 +17,7 @@ import {
   MAX_SESSIONS_PER_DAY,
 } from '../lib/booking-rules'
 import { formatPlayerName } from '../lib/schedule-display'
+import { loadCachedSchedule, saveCachedSchedule } from '../lib/schedule-cache'
 import { DEFAULT_PRACTICE_LOCATIONS, MATCH_PLAY_LOCATIONS, isBarnesLocation } from '../lib/locations'
 
 // Code-split the interaction-only surfaces (the court-card pager and the
@@ -244,6 +245,26 @@ export default function Home() {
   const [staffCodeRequired, setStaffCodeRequired] = useState(false)
   const lastScheduleSync = useRef(0)
 
+  // Applies one schedule payload (fresh from the API or a cached snapshot) to
+  // all the state the booking screen renders from. Kept as a single stable
+  // callback so both the initial hydrate and every later refresh share it.
+  const applyScheduleResult = useCallback((result) => {
+    setReservations(result.reservations || {})
+    if (Array.isArray(result.roster) && result.roster.length > 0) setRoster(result.roster)
+    if (Array.isArray(result.locations) && result.locations.length > 0) setLocations(result.locations)
+    if (result.courtsByDate && typeof result.courtsByDate === 'object') setCourtsByDate(result.courtsByDate)
+    if (Array.isArray(result.days) && result.days.length > 0) {
+      const dayObjects = buildDayObjects(result.days)
+      setDays(dayObjects)
+      setSelectedDay((prev) => {
+        if (prev && dayObjects.some((d) => d.key === prev)) return prev
+        return pickDefaultDay(dayObjects)
+      })
+    }
+    setSheetsConnected(result.connected === true)
+    setStaffCodeRequired(result.staffCodeRequired === true)
+  }, [])
+
   useEffect(() => {
     setMounted(true)
   }, [])
@@ -272,20 +293,19 @@ export default function Home() {
       if (!response.ok) throw new Error('Failed to load schedule')
       const result = await response.json()
       lastScheduleSync.current = Date.now()
-      setReservations(result.reservations || {})
-      if (Array.isArray(result.roster) && result.roster.length > 0) setRoster(result.roster)
-      if (Array.isArray(result.locations) && result.locations.length > 0) setLocations(result.locations)
-      if (result.courtsByDate && typeof result.courtsByDate === 'object') setCourtsByDate(result.courtsByDate)
-      if (Array.isArray(result.days) && result.days.length > 0) {
-        const dayObjects = buildDayObjects(result.days)
-        setDays(dayObjects)
-        setSelectedDay((prev) => {
-          if (prev && dayObjects.some((d) => d.key === prev)) return prev
-          return pickDefaultDay(dayObjects)
+      applyScheduleResult(result)
+      // Only persist a successful, connected load so a transient Sheets outage
+      // can never pin a "not connected" state into the next visit's cache.
+      if (result.connected === true) {
+        saveCachedSchedule({
+          reservations: result.reservations || {},
+          roster: Array.isArray(result.roster) ? result.roster : [],
+          locations: Array.isArray(result.locations) ? result.locations : [],
+          courtsByDate: result.courtsByDate || {},
+          days: Array.isArray(result.days) ? result.days : [],
+          connected: true,
         })
       }
-      setSheetsConnected(result.connected === true)
-      setStaffCodeRequired(result.staffCodeRequired === true)
       return true
     } catch (e) {
       console.warn('Unable to load schedule from the server', e)
@@ -294,11 +314,15 @@ export default function Home() {
     } finally {
       setRosterLoaded(true)
     }
-  }, [])
+  }, [applyScheduleResult])
 
   useEffect(() => {
+    // Paint instantly from the last known schedule, then refresh in the
+    // background so repeat visits never wait on the Sheets round-trip.
+    const cached = loadCachedSchedule()
+    if (cached) applyScheduleResult(cached)
     refreshSchedule()
-  }, [refreshSchedule])
+  }, [refreshSchedule, applyScheduleResult])
 
   // Pick up bookings made by other players (or direct sheet edits) when the
   // tab is revisited, without hammering the Sheets backend.
@@ -418,6 +442,15 @@ export default function Home() {
       practiceLocations: activeLocations,
     })
   }, [reservations, selectedDay, currentPlayer, activeLocations])
+
+  // Practice sessions the signed-in player has on the Find-a-Court day. Computed
+  // once per render of the modal (not on every keystroke) — this was previously
+  // an inline existingPlayerSessions() call that re-scanned every reservation
+  // on each input change.
+  const findSessionsUsed = useMemo(() => {
+    if (!currentPlayer || !findDay) return 0
+    return existingPlayerSessions(reservations, { dateKey: findDay, name: currentPlayer, practiceLocations: activeLocations }).length
+  }, [currentPlayer, findDay, reservations, activeLocations])
 
   const timeLabelToMinutes = useCallback((label) => {
     const m = String(label).match(/(\d{1,2}):(\d{2})\s*(AM|PM)/i)
@@ -619,6 +652,15 @@ export default function Home() {
       }
     }
   }, [bookingModal, reservations, activeLocations, handleGroupWrite])
+
+  const openPlayerReservations = useCallback(() => setShowPlayerReservations(true), [])
+
+  // Selecting a player inside Find-a-Court also clears any stale notice so the
+  // step-4 results re-evaluate against the new player.
+  const handleFindPlayerSelect = useCallback((name) => {
+    setCurrentPlayer(name)
+    setFindNotice(null)
+  }, [])
 
   const openFindCourt = useCallback(() => {
     const preferred = selectedDay && isBookableDay(selectedDay)
@@ -923,7 +965,7 @@ export default function Home() {
               appearance="navbar"
               className="max-w-full flex-wrap justify-center"
               sessionsLabel={`${Math.min(mySessionsToday.length, MAX_SESSIONS_PER_DAY)}/${MAX_SESSIONS_PER_DAY} sessions`}
-              onOpenReservations={() => setShowPlayerReservations(true)}
+              onOpenReservations={openPlayerReservations}
             />
           </div>
         </nav>
@@ -1223,14 +1265,11 @@ export default function Home() {
                 <PlayerSwitcher
                   currentPlayer={currentPlayer}
                   roster={roster}
-                  onSelect={(name) => {
-                    setCurrentPlayer(name)
-                    setFindNotice(null)
-                  }}
+                  onSelect={handleFindPlayerSelect}
                   appearance="header"
                   dropdownAlign="left"
-                  sessionsLabel={`${Math.min(currentPlayer ? existingPlayerSessions(reservations, { dateKey: findDay, name: currentPlayer, practiceLocations: activeLocations }).length : 0, MAX_SESSIONS_PER_DAY)}/${MAX_SESSIONS_PER_DAY} sessions`}
-                  onOpenReservations={() => setShowPlayerReservations(true)}
+                  sessionsLabel={`${Math.min(findSessionsUsed, MAX_SESSIONS_PER_DAY)}/${MAX_SESSIONS_PER_DAY} sessions`}
+                  onOpenReservations={openPlayerReservations}
                 />
               </div>
             </div>
