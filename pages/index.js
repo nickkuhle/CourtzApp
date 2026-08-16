@@ -1,10 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import dynamic from 'next/dynamic'
 import Head from 'next/head'
 import CourtGrid from '../components/CourtGrid'
-import CourtCardCarousel from '../components/CourtCardCarousel'
-import GroupBookingModal from '../components/GroupBookingModal'
 import PlayerSwitcher from '../components/PlayerSwitcher'
-import PlayerReservationsModal from '../components/PlayerReservationsModal'
 import DayCarousel from '../components/DayCarousel'
 import DaySlide from '../components/DaySlide'
 import SiteOverview from '../components/SiteOverview'
@@ -15,9 +13,28 @@ import {
   isSlotCompleted,
   existingPlayerSessions,
   validateBooking,
+  getSlotBookingState,
   MAX_SESSIONS_PER_DAY,
 } from '../lib/booking-rules'
+import { formatPlayerName } from '../lib/schedule-display'
 import { DEFAULT_PRACTICE_LOCATIONS, MATCH_PLAY_LOCATIONS, isBarnesLocation } from '../lib/locations'
+
+// Code-split the interaction-only surfaces (the court-card pager and the
+// booking/reservation dialogs) so the initial page payload stays light. Each
+// chunk is fetched only when the user actually opens it, which is the biggest
+// single win for first paint on a phone or a slow tournament wifi.
+const CourtCardCarousel = dynamic(() => import('../components/CourtCardCarousel'), { ssr: false, loading: () => <ModalSpinner /> })
+const GroupBookingModal = dynamic(() => import('../components/GroupBookingModal'), { ssr: false, loading: () => <ModalSpinner /> })
+const PlayerReservationsModal = dynamic(() => import('../components/PlayerReservationsModal'), { ssr: false, loading: () => <ModalSpinner /> })
+
+// Brief overlay shown while a lazy modal chunk loads (usually <100ms).
+function ModalSpinner() {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40" aria-hidden="true">
+      <div className="h-9 w-9 animate-spin rounded-full border-2 border-white/30 border-t-white" />
+    </div>
+  )
+}
 
 const LOGO_URL = '/logo.svg'
 const MAX_PLAYERS_PER_SLOT = 4
@@ -783,6 +800,29 @@ export default function Home() {
     })
   }, [selectedCourt, selectedLocation, selectedDay, viewOnlyDate, reservations, activeLocations])
 
+  // Called by the Site overview grid when a specific court × time square is
+  // tapped. Jumps straight into the booking (or cancellation) dialog for that
+  // exact slot instead of opening the court card first. Mirrors the click
+  // behaviour of the court schedule cards so the two views feel identical.
+  const handleSiteOverviewSlot = useCallback(({ court, slot, players }) => {
+    if (viewOnlyDate) {
+      alert('This day is view only — bookings and cancellations are only available for today and tomorrow.')
+      return
+    }
+    const reservedBy = Array.isArray(players) ? players : []
+    const { action, isReservedFullForOthers } = getSlotBookingState(reservedBy, currentPlayer)
+    if (isReservedFullForOthers) {
+      alert(`That slot is fully booked (${MAX_PLAYERS_PER_SLOT}/${MAX_PLAYERS_PER_SLOT}) by ${reservedBy.map(formatPlayerName).join(', ')}.`)
+      return
+    }
+    if (action === 'cancel') {
+      handleOpenBooking({ mode: 'cancel', slots: [slot], players: [...new Set(reservedBy)], courtId: court.id, location: selectedLocation, date: selectedDay })
+      return
+    }
+    const initial = currentPlayer ? [currentPlayer] : []
+    handleOpenBooking({ mode: 'book', slots: [slot], players: initial, courtId: court.id, location: selectedLocation, date: selectedDay })
+  }, [viewOnlyDate, currentPlayer, selectedLocation, selectedDay, handleOpenBooking])
+
   // Called by the Player's reservations dialog when a current or upcoming
   // reservation is tapped. The whole group booked in that window is
   // pre-selected in the cancellation dialog so individual players can be
@@ -851,28 +891,37 @@ export default function Home() {
 
       <div className="max-w-6xl mx-auto">
         {/* Navigation */}
-        <nav className="sticky top-4 z-40 flex flex-wrap lg:flex-nowrap justify-between items-center gap-3 bg-[#1f5f99]/90 border border-blue-300/10 backdrop-blur-xl rounded-[2rem] px-4 sm:px-6 py-3 sm:py-4 shadow-2xl shadow-slate-950/20 mb-6">
-          <div className="flex items-center gap-3 min-w-0">
-            <img src={LOGO_URL} alt="USTA logo" className="h-9 w-9 sm:h-10 sm:w-10 rounded-full border border-white/20 bg-white/10 object-cover shrink-0" />
-            <div className="min-w-0">
-              <div className="text-sm sm:text-base lg:text-lg font-semibold tracking-tight text-white truncate">USTA Girl&apos;s National Championships</div>
-              <div className="text-xs uppercase tracking-[0.15em] text-slate-400 truncate">Practice Courts</div>
+        <nav className="sticky top-4 z-40 bg-[#1f5f99]/90 border border-blue-300/10 backdrop-blur-xl rounded-[2rem] px-4 sm:px-6 py-3 sm:py-4 shadow-2xl shadow-slate-950/20 mb-6">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-center gap-3 min-w-0">
+              <img src={LOGO_URL} alt="USTA logo" className="h-9 w-9 sm:h-10 sm:w-10 rounded-full border border-white/20 bg-white/10 object-cover shrink-0" />
+              <div className="min-w-0">
+                <div className="text-sm sm:text-base lg:text-lg font-semibold tracking-tight text-white truncate">USTA Girl&apos;s National Championships</div>
+                <div className="text-xs uppercase tracking-[0.15em] text-slate-400 truncate">Practice Courts</div>
+              </div>
+            </div>
+            <div className="flex items-center gap-2 text-sm shrink-0">
+              <button className="rounded-full px-3 py-1.5 bg-emerald-500 text-white shadow-sm shadow-emerald-500/20 transition">Practice Courts</button>
+              <button
+                type="button"
+                onClick={openFindCourt}
+                className="rounded-full px-3 py-1.5 bg-white/15 text-white border border-white/20 hover:bg-white/25 transition"
+              >
+                Find a Court
+              </button>
             </div>
           </div>
-          <div className="flex flex-wrap lg:flex-nowrap justify-center items-center gap-2 text-sm shrink-0">
-            <button className="rounded-full px-3 py-1.5 bg-emerald-500 text-white shadow-sm shadow-emerald-500/20 transition">Practice Courts</button>
-            <button
-              type="button"
-              onClick={openFindCourt}
-              className="rounded-full px-3 py-1.5 bg-white/15 text-white border border-white/20 hover:bg-white/25 transition"
-            >
-              Find a Court
-            </button>
+          {/* The green "booking courts as" pill sits on its own centered line so
+              it never forces the navbar wider than a phone screen. max-w-full +
+              flex-wrap lets its controls wrap on the very narrowest phones
+              instead of overflowing. */}
+          <div className="mt-3 flex justify-center">
             <PlayerSwitcher
               currentPlayer={currentPlayer}
               roster={roster}
               onSelect={setCurrentPlayer}
               appearance="navbar"
+              className="max-w-full flex-wrap justify-center"
               sessionsLabel={`${Math.min(mySessionsToday.length, MAX_SESSIONS_PER_DAY)}/${MAX_SESSIONS_PER_DAY} sessions`}
               onOpenReservations={() => setShowPlayerReservations(true)}
             />
@@ -1085,6 +1134,7 @@ export default function Home() {
                     slotLabels={THIRTY_MIN_SLOTS}
                     completedSlots={completedSlots}
                     onSelectCourt={handleSelectCourt}
+                    onSelectSlot={handleSiteOverviewSlot}
                   />
                 ) : (
                   <CourtGrid courts={courts} reservations={reservations} onSelect={handleSelectCourt} selectedCourt={selectedCourt} completedSlots={completedSlots} />
