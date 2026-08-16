@@ -204,6 +204,39 @@ test('Player X can join the same partially occupied slot after Player A books it
   assert.deepEqual(schedule.reservations[key]?.[sharedSlot], [playerA, playerX])
 })
 
+test('reported Reena→Jordyn flow: both players end up in the same evening Barnes slot', async () => {
+  // The desk-reported scenario: Reena books Barnes Court 4 at 5:30-6:00 PM,
+  // then the court card switches to Jordyn and the same slot is tapped. The
+  // write boundary must store BOTH players side by side in the 5:30 PM slot.
+  const location = 'Barnes Tennis Center'
+  const courtId = 4
+  const eveningSlot = slot(1050) // 5:30 PM–6:00 PM
+  const playerA = 'Alavalapati, Reena'
+  const playerX = 'Hazelitt, Jordyn'
+
+  const first = await post('book', {
+    location,
+    date: TOMORROW,
+    courtId,
+    slots: [eveningSlot],
+    names: [playerA],
+  })
+  assert.equal(first.statusCode, 200, JSON.stringify(first.body))
+
+  const second = await post('book', {
+    location,
+    date: TOMORROW,
+    courtId,
+    slots: [eveningSlot],
+    names: [playerX],
+  })
+  assert.equal(second.statusCode, 200, JSON.stringify(second.body))
+
+  const schedule = await getSchedule(true)
+  const key = `${location}|${TOMORROW}|${courtId}`
+  assert.deepEqual(schedule.reservations[key]?.[eveningSlot], [playerA, playerX])
+})
+
 test('Barnes adjacent 30-minute bookings need staff approval; the hard 2-session limit cannot be bypassed', async () => {
   const player = 'Abbey, Stephanie'
   const first = await post('book', {

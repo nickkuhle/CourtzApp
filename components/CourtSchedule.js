@@ -533,11 +533,11 @@ const CourtSchedule = React.memo(function CourtSchedule({
                     return
                   }
                   if (action === 'cancel') {
-                    onOpenBooking({ mode: 'cancel', slots: [slot.label], players: [...new Set(players)], courtId: court, location, date })
+                    onOpenBooking({ source: 'slot', mode: 'cancel', slots: [slot.label], players: [...new Set(players)], courtId: court, location, date })
                     return
                   }
                   const initial = currentPlayer ? [currentPlayer] : []
-                  onOpenBooking({ mode: 'book', slots: [slot.label], players: initial, courtId: court, location, date })
+                  onOpenBooking({ source: 'slot', mode: 'book', slots: [slot.label], players: initial, courtId: court, location, date })
                 }}
                 onCancelPlayer={(name) => {
                   if (ended) {

@@ -11,6 +11,7 @@ import {
   proposedSession,
   validateBooking,
   getSlotBookingState,
+  getSlotTapIntent,
   MAX_SESSIONS_PER_DAY,
 } from '../lib/booking-rules.js'
 import { DEFAULT_PRACTICE_LOCATIONS } from '../lib/locations.js'
@@ -159,6 +160,36 @@ test('switching players makes another player\'s partially occupied slot bookable
   assert.equal(fullForX.action, 'book')
   assert.equal(fullForX.isFull, true)
   assert.equal(fullForX.isReservedFullForOthers, true)
+})
+
+test('a slot tap resolves to the latest selected player, not the stale card payload', () => {
+  // The reported flow: Reena (Player A) holds the 5:30-6:00 slot. The court
+  // card rendered while Reena was selected, so its click closure still carries
+  // `mode: cancel, players: [Reena]`. The desk has since switched the card to
+  // Jordyn (Player X) and taps the same slot. The authoritative intent must be
+  // a BOOK for Jordyn - never a cancellation of Reena.
+  const intent = getSlotTapIntent(['Alavalapati, Reena'], 'Hazelitt, Jordyn')
+  assert.equal(intent.mode, 'book')
+  assert.deepEqual(intent.players, ['Hazelitt, Jordyn'])
+
+  // Reena herself still gets the manage/cancel intent for her own slot.
+  const owner = getSlotTapIntent(['Alavalapati, Reena'], 'Alavalapati, Reena')
+  assert.equal(owner.mode, 'cancel')
+  assert.deepEqual(owner.players, ['Alavalapati, Reena'])
+
+  // A blank switcher on a partially occupied slot opens an empty book dialog.
+  const blank = getSlotTapIntent(['Alavalapati, Reena'], '')
+  assert.equal(blank.mode, 'book')
+  assert.deepEqual(blank.players, [])
+
+  // Names are normalized and deduplicated.
+  const messy = getSlotTapIntent([' A ', 'A', ' B '], 'B')
+  assert.equal(messy.mode, 'cancel')
+  assert.deepEqual(messy.players, ['A', 'B'])
+
+  // Non-array / malformed occupancy never throws.
+  assert.deepEqual(getSlotTapIntent(null, 'X'), { mode: 'book', players: ['X'] })
+  assert.deepEqual(getSlotTapIntent(undefined, 'X'), { mode: 'book', players: ['X'] })
 })
 
 // --- Session grouping -------------------------------------------------------

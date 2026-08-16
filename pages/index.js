@@ -13,7 +13,7 @@ import {
   isSlotCompleted,
   existingPlayerSessions,
   validateBooking,
-  getSlotBookingState,
+  getSlotTapIntent,
   MAX_SESSIONS_PER_DAY,
 } from '../lib/booking-rules'
 import { formatPlayerName } from '../lib/schedule-display'
@@ -243,14 +243,26 @@ export default function Home() {
   const [sheetsConnected, setSheetsConnected] = useState(null) // null = still loading/unknown
   const [staffCodeRequired, setStaffCodeRequired] = useState(false)
   const lastScheduleSync = useRef(0)
+  const currentPlayerRef = useRef('')
+
+  // Keep the selected player in BOTH React state and a synchronous ref.
+  // A selection change and a slot tap are two separate React updates; when the
+  // desk switches "Booking Courts As" and immediately taps a time, the court
+  // card may still be rendering the previous player. Booking handlers read the
+  // ref, so they always act on the exact latest selection.
+  const handleSelectPlayer = useCallback((name) => {
+    const nextPlayer = String(name || '').trim()
+    currentPlayerRef.current = nextPlayer
+    setCurrentPlayer(nextPlayer)
+  }, [])
 
   useEffect(() => {
     setMounted(true)
   }, [])
 
   useEffect(() => {
-    setCurrentPlayer(getPlayerFromUrl())
-  }, [])
+    handleSelectPlayer(getPlayerFromUrl())
+  }, [handleSelectPlayer])
 
   // Remembered practice locations (the + button additions survive reloads).
   useEffect(() => {
@@ -312,7 +324,7 @@ export default function Home() {
 
   useEffect(() => {
     if (rosterLoaded && currentPlayer && roster.length > 0 && !roster.includes(currentPlayer)) {
-      setCurrentPlayer('')
+      handleSelectPlayer('')
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [rosterLoaded])
@@ -719,7 +731,7 @@ export default function Home() {
   // Supports blank currentPlayer: user can click court and time slot, then add
   // any players in booking modal. Also prevents duplicate booking by passing
   // bookedPlayers to modal so already-booked players are excluded from search.
-  const handleOpenBooking = useCallback(({ mode, slots, players, courtId, location, date }) => {
+  const handleOpenBooking = useCallback(({ source = 'direct', mode, slots, players, courtId, location, date }) => {
     const bookingCourt = courtId ?? selectedCourt
     const bookingLocation = location || selectedLocation
     const bookingDate = date || selectedDay
@@ -728,18 +740,38 @@ export default function Home() {
       return
     }
     const dateObj = dateKeyToLocalDate(bookingDate)
-    // booked players already in those slots
     const reservationKey = `${bookingLocation}|${bookingDate}|${bookingCourt}`
     const bookedPlayers = [...new Set((slots || []).flatMap((slot) => reservations[reservationKey]?.[slot] || []))]
+    const eventPlayers = [...new Set((players || []).map((name) => String(name).trim()).filter(Boolean))]
 
-    if (mode === 'cancel') {
+    // A tap on a time slot is re-resolved here from the player switcher's
+    // synchronous ref plus the slot's CURRENT occupants. This is deliberately
+    // independent of the mode/players the court card captured when it
+    // rendered: if the card still showed Player A a moment after the desk
+    // switched to Player X, the tap still books X into A's partially occupied
+    // slot. Explicit per-player x buttons and reservation cards keep their
+    // targeted cancellation intent because they use source="direct".
+    const slotIntent = source === 'slot'
+      ? getSlotTapIntent(bookedPlayers, currentPlayerRef.current)
+      : null
+    const effectiveMode = slotIntent?.mode || mode
+    const effectivePlayers = slotIntent?.players || eventPlayers
+
+    // Safety net for a full slot reached from a stale render: the selected
+    // player cannot be added, and only an owner may manage (cancel) it.
+    if (source === 'slot' && effectiveMode === 'book' && bookedPlayers.length >= MAX_PLAYERS_PER_SLOT) {
+      alert(`That slot is fully booked (${MAX_PLAYERS_PER_SLOT}/${MAX_PLAYERS_PER_SLOT}) by ${bookedPlayers.map(formatPlayerName).join(', ')}.`)
+      return
+    }
+
+    if (effectiveMode === 'cancel') {
       const validation = validateBooking({
-        action: mode,
+        action: 'cancel',
         location: bookingLocation,
         date: bookingDate,
         courtId: bookingCourt,
         slots,
-        names: players,
+        names: effectivePlayers,
         staffApproved: false,
         reservations,
         practiceLocations: activeLocations,
@@ -750,12 +782,12 @@ export default function Home() {
       }
       setBookingModal({
         origin: 'schedule',
-        mode,
+        mode: 'cancel',
         location: bookingLocation,
         date: bookingDate,
         courtId: bookingCourt,
         slots,
-        players,
+        players: effectivePlayers,
         bookedPlayers: [],
         title: `Cancel Court ${bookingCourt}`,
         subtitle: `${bookingLocation} · ${formatDateLong(dateObj)}`,
@@ -763,20 +795,14 @@ export default function Home() {
       return
     }
 
-    // CourtSchedule sends the player that was selected on the card at the exact
-    // moment the slot was tapped. Prefer that event value over this callback's
-    // surrounding state so a just-completed switch from Player A to Player X
-    // can never open a modal prefilled with A. Blank selection still opens the
-    // modal and lets the desk choose a player there.
-    const initialPlayers = [...new Set((players || []).map((name) => String(name).trim()).filter(Boolean))]
-    if (initialPlayers.length) {
+    if (effectivePlayers.length) {
       const validation = validateBooking({
         action: 'book',
         location: bookingLocation,
         date: bookingDate,
         courtId: bookingCourt,
         slots,
-        names: initialPlayers,
+        names: effectivePlayers,
         staffApproved: false,
         reservations,
         practiceLocations: activeLocations,
@@ -793,7 +819,7 @@ export default function Home() {
       date: bookingDate,
       courtId: bookingCourt,
       slots,
-      players: initialPlayers,
+      players: effectivePlayers,
       bookedPlayers,
       title: `Book Court ${bookingCourt}`,
       subtitle: `${bookingLocation} · ${formatDateLong(dateObj)}`,
@@ -802,26 +828,12 @@ export default function Home() {
 
   // Called by the Site overview grid when a specific court × time square is
   // tapped. Jumps straight into the booking (or cancellation) dialog for that
-  // exact slot instead of opening the court card first. Mirrors the click
-  // behaviour of the court schedule cards so the two views feel identical.
-  const handleSiteOverviewSlot = useCallback(({ court, slot, players }) => {
-    if (viewOnlyDate) {
-      alert('This day is view only — bookings and cancellations are only available for today and tomorrow.')
-      return
-    }
-    const reservedBy = Array.isArray(players) ? players : []
-    const { action, isReservedFullForOthers } = getSlotBookingState(reservedBy, currentPlayer)
-    if (isReservedFullForOthers) {
-      alert(`That slot is fully booked (${MAX_PLAYERS_PER_SLOT}/${MAX_PLAYERS_PER_SLOT}) by ${reservedBy.map(formatPlayerName).join(', ')}.`)
-      return
-    }
-    if (action === 'cancel') {
-      handleOpenBooking({ mode: 'cancel', slots: [slot], players: [...new Set(reservedBy)], courtId: court.id, location: selectedLocation, date: selectedDay })
-      return
-    }
-    const initial = currentPlayer ? [currentPlayer] : []
-    handleOpenBooking({ mode: 'book', slots: [slot], players: initial, courtId: court.id, location: selectedLocation, date: selectedDay })
-  }, [viewOnlyDate, currentPlayer, selectedLocation, selectedDay, handleOpenBooking])
+  // exact slot instead of opening the court card first. Delegates to
+  // handleOpenBooking as a 'slot' tap so the intent is re-resolved from the
+  // latest selected player exactly like a court-card slot tap.
+  const handleSiteOverviewSlot = useCallback(({ court, slot }) => {
+    handleOpenBooking({ source: 'slot', mode: 'book', slots: [slot], players: [], courtId: court.id, location: selectedLocation, date: selectedDay })
+  }, [handleOpenBooking, selectedLocation, selectedDay])
 
   // Called by the Player's reservations dialog when a current or upcoming
   // reservation is tapped. The whole group booked in that window is
@@ -919,7 +931,7 @@ export default function Home() {
             <PlayerSwitcher
               currentPlayer={currentPlayer}
               roster={roster}
-              onSelect={setCurrentPlayer}
+              onSelect={handleSelectPlayer}
               appearance="navbar"
               className="max-w-full flex-wrap justify-center"
               sessionsLabel={`${Math.min(mySessionsToday.length, MAX_SESSIONS_PER_DAY)}/${MAX_SESSIONS_PER_DAY} sessions`}
@@ -1224,7 +1236,7 @@ export default function Home() {
                   currentPlayer={currentPlayer}
                   roster={roster}
                   onSelect={(name) => {
-                    setCurrentPlayer(name)
+                    handleSelectPlayer(name)
                     setFindNotice(null)
                   }}
                   appearance="header"
@@ -1441,7 +1453,7 @@ export default function Home() {
           reservations={reservations}
           roster={roster}
           currentPlayer={currentPlayer}
-          onSelectPlayer={setCurrentPlayer}
+          onSelectPlayer={handleSelectPlayer}
           pendingReservations={pendingReservations}
           practiceLocations={activeLocations}
           viewOnly={viewOnlyDate}
